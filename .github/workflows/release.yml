@@ -39,7 +39,7 @@ jobs:
       - name: Install build tools and runtime deps
         run: |
           pacman -Sy --noconfirm base-devel git sudo \
-            python-pyside6 python-numpy libpulse pipewire pipewire-pulse
+            pyside6 python-numpy libpulse pipewire pipewire-pulse
 
       - uses: actions/checkout@v4
 

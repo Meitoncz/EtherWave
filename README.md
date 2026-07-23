@@ -143,7 +143,7 @@ the client runs — allow it, or discovery/audio packets never arrive.
 
 PipeWire + WirePlumber should already be your active audio server (default
 on CachyOS). The server does **not** need `sounddevice`/PortAudio — it
-captures via `parec` (see Requirements above), so `python-pyside6` and
+captures via `parec` (see Requirements above), so `pyside6` and
 `python-numpy` are the only Python-side deps.
 
 ### Option A: PKGBUILD (recommended)
@@ -163,7 +163,7 @@ Launch it from your app menu, or just run `etherwave-server`.
 ### Option B: run from source
 
 ```bash
-sudo pacman -S python python-pyside6 python-numpy pipewire pipewire-pulse wireplumber
+sudo pacman -S python pyside6 python-numpy pipewire pipewire-pulse wireplumber
 git clone https://github.com/Meitoncz/EtherWave.git
 cd EtherWave/server
 python main.py

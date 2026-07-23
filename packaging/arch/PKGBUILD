@@ -14,7 +14,7 @@ pkgdesc="EtherWave: ultra-low-latency multichannel audio streaming server (PipeW
 arch=('any')
 url="https://github.com/Meitoncz/EtherWave"
 license=('MIT')
-depends=('python' 'python-pyside6' 'python-numpy' 'libpulse' 'pipewire' 'pipewire-pulse')
+depends=('python' 'pyside6' 'python-numpy' 'libpulse' 'pipewire' 'pipewire-pulse')
 source=()
 sha256sums=()
 
