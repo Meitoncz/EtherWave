@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write  # required for softprops/action-gh-release to create the release
+
 jobs:
   build-macos:
     runs-on: macos-latest
