@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=EtherWave Server
+Comment=Ultra-low-latency multichannel audio streaming server
+Exec=etherwave-server
+Icon=etherwave
+Terminal=false
+Categories=AudioVideo;Audio;

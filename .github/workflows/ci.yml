@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  compile-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system audio libs (needed to import sounddevice/PySide6 headlessly)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libasound2 desktop-file-utils \
+            libegl1 libxkbcommon0 libxcb-cursor0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt Pillow
+
+      - name: Byte-compile every module (catches syntax errors)
+        run: python -m py_compile server/*.py client/*.py
+
+      - name: Import + construct both main windows headlessly
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          import sys
+
+          sys.path.insert(0, "server")
+          from PySide6.QtWidgets import QApplication
+          app = QApplication(sys.argv)
+
+          from gui import ServerMainWindow
+          server_window = ServerMainWindow()
+          server_window._quitting = True
+          server_window.close()
+          print("server GUI constructed OK")
+
+          for name in ("discovery", "audio_engine", "gui"):
+              sys.modules.pop(name, None)
+          sys.path.remove("server")
+          sys.path.insert(0, "client")
+
+          from gui import ClientMainWindow
+          client_window = ClientMainWindow()
+          client_window._quitting = True
+          client_window.close()
+          print("client GUI constructed OK")
+          PY
+
+      - name: Regenerate icon (sanity-checks the Pillow script)
+        run: python assets/generate_icon.py
+
+      - name: Validate packaging metadata
+        run: |
+          desktop-file-validate packaging/arch/etherwave-server.desktop
+          bash -n packaging/arch/etherwave-server.sh
+          bash -n packaging/macos/build.sh
+          bash -n packaging/macos/install.sh
+          python -m py_compile packaging/macos/EtherWaveClient.spec
+          python -c "import xml.dom.minidom as m; m.parse('packaging/macos/com.etherwave.client.plist')"

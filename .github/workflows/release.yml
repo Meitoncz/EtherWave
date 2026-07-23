@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build EtherWave Client.app
+        run: |
+          cd packaging/macos
+          chmod +x build.sh install.sh
+          ./build.sh
+
+      - name: Zip the app bundle
+        run: |
+          cd packaging/macos/dist
+          zip -r "EtherWave-Client-macOS.zip" "EtherWave Client.app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EtherWave-Client-macOS
+          path: packaging/macos/dist/EtherWave-Client-macOS.zip
+
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install build tools and runtime deps
+        run: |
+          pacman -Sy --noconfirm base-devel git sudo \
+            python-pyside6 python-numpy libpulse pipewire pipewire-pulse
+
+      - uses: actions/checkout@v4
+
+      - name: Build package as non-root (makepkg refuses to run as root)
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          su builder -c "cd packaging/arch && makepkg -f --noconfirm"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EtherWave-Server-Arch
+          path: packaging/arch/*.pkg.tar.zst
+
+  create-release:
+    needs: [build-macos, build-arch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/EtherWave-Client-macOS/*.zip
+            artifacts/EtherWave-Server-Arch/*.pkg.tar.zst

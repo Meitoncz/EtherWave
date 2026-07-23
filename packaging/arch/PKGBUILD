@@ -1,0 +1,33 @@
+# Maintainer: (fill in your name/email)
+#
+# Builds from the local repo checkout (no network fetch needed): run
+#   cd packaging/arch && makepkg -si
+# from within a clone of the EtherWave repository. sounddevice/PortAudio is
+# NOT a dependency here -- the server captures via `parec` (see
+# server/audio_engine.py), not PortAudio, which can't see PipeWire's
+# virtual-sink monitor sources.
+
+pkgname=etherwave-server
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="EtherWave: ultra-low-latency multichannel audio streaming server (PipeWire virtual sink -> LAN)"
+arch=('any')
+url="https://github.com/Meitoncz/EtherWave"
+license=('MIT')
+depends=('python' 'python-pyside6' 'python-numpy' 'libpulse' 'pipewire' 'pipewire-pulse')
+source=()
+sha256sums=()
+
+package() {
+    local repo_root="$startdir/../.."
+
+    install -dm755 "$pkgdir/usr/share/etherwave-server"
+    cp -r "$repo_root/server" "$pkgdir/usr/share/etherwave-server/server"
+    cp -r "$repo_root/assets" "$pkgdir/usr/share/etherwave-server/assets"
+    find "$pkgdir/usr/share/etherwave-server" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+    install -Dm755 "$startdir/etherwave-server.sh" "$pkgdir/usr/bin/etherwave-server"
+    install -Dm644 "$startdir/etherwave-server.desktop" "$pkgdir/usr/share/applications/etherwave-server.desktop"
+    install -Dm644 "$repo_root/assets/icon.png" "$pkgdir/usr/share/pixmaps/etherwave.png"
+    install -Dm644 "$startdir/etherwave-server.service" "$pkgdir/usr/lib/systemd/user/etherwave-server.service"
+}
