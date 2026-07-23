@@ -240,10 +240,23 @@ class AudioCaptureThread(QThread):
 
         bytes_per_frame = self.channels * BYTES_PER_SAMPLE
         chunk_bytes = self.blocksize * bytes_per_frame
+        packet_duration = self.blocksize / self.samplerate
 
         seq = 0
         last_emit = 0.0
         read_buffer = b""
+        # Paces packet transmission to the real playback rate rather than
+        # however parec happens to deliver data. Measured directly on this
+        # server: parec/our own read loop deliver data in ~10ms bursts (two
+        # packets ~2us apart, then a gap), not a smooth 5ms trickle, even
+        # though the *average* rate is correct. Sending a burst back-to-back
+        # instead of spacing it out stresses the client's jitter buffer with
+        # irregular arrival timing, causing underruns that look like random
+        # network jitter but aren't. next_send_time schedules each packet at
+        # its intended real-time slot; if we're running a burst early we
+        # sleep to the schedule, and if we've genuinely fallen behind we
+        # catch up without trying to replay a backlog instantly.
+        next_send_time = time.perf_counter()
 
         try:
             while not self._stop_flag:
@@ -264,6 +277,16 @@ class AudioCaptureThread(QThread):
                 while len(read_buffer) >= chunk_bytes:
                     frame_bytes = read_buffer[:chunk_bytes]
                     read_buffer = read_buffer[chunk_bytes:]
+
+                    now = time.perf_counter()
+                    if now < next_send_time:
+                        time.sleep(next_send_time - now)
+                    elif next_send_time < now - packet_duration:
+                        # Fell meaningfully behind (real stall, not just a
+                        # small burst) -- resync the schedule to now instead
+                        # of trying to instantly replay the backlog.
+                        next_send_time = now
+                    next_send_time += packet_duration
 
                     header = struct.pack(HEADER_FORMAT, MAGIC, seq & 0xFFFFFFFF,
                                           time.time(), self.channels, self.blocksize)

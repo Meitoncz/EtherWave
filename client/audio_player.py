@@ -289,6 +289,15 @@ class NetworkReceiveThread(QThread):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if hasattr(socket, "SO_REUSEPORT"):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            # Request a generous receive buffer: at 6-8ch float32 @ 48kHz
+            # this stream runs at roughly 1-1.5 MB/s, and the OS default
+            # (often just tens of KB, especially on macOS) can overflow
+            # during any brief scheduling hiccup on this thread -- the
+            # kernel silently drops what doesn't fit, which is
+            # indistinguishable from real network packet loss and shows up
+            # as jitter-buffer underruns. The OS clamps this to its own max
+            # if 1 MiB isn't allowed; no error either way.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
             sock.bind(("", self.audio_port))
             sock.settimeout(0.5)
         except OSError as exc:
