@@ -19,8 +19,11 @@ jobs:
       - name: Install system audio libs (needed to import sounddevice/PySide6 headlessly)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libportaudio2 libasound2 desktop-file-utils \
-            libegl1 libxkbcommon0 libxcb-cursor0
+          # libasound2 was renamed libasound2t64 on Ubuntu 24.04+ (64-bit
+          # time_t transition); install whichever exists on this runner.
+          sudo apt-get install -y libportaudio2 desktop-file-utils \
+            libegl1 libxkbcommon0 libxcb-cursor0 \
+            $(apt-cache show libasound2t64 >/dev/null 2>&1 && echo libasound2t64 || echo libasound2)
 
       - name: Install Python dependencies
         run: |
