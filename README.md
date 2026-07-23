@@ -311,6 +311,11 @@ future settings — add a widget, then one line in each to wire it up.
 
 ## Disclaimer
 
+I built EtherWave primarily for myself: I'd spent years searching online
+for something like it, and every similar tool I found only supported
+stereo — nothing did real multichannel (5.1/7.1) LAN streaming the way I
+wanted.
+
 EtherWave was built with the help of AI. That said, I'm a technically
 grounded person with years of professional experience in the IT industry,
 including years of hands-on frontend development among other areas —
