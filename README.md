@@ -308,3 +308,14 @@ future settings — add a widget, then one line in each to wire it up.
   a single LAN segment.
 - Audio format is fixed at 32-bit float / 48,000 Hz throughout the pipeline
   for consistent, low-latency, distortion-free transport.
+
+## Disclaimer
+
+EtherWave was built with the help of AI. That said, I'm a technically
+grounded person with years of professional experience in the IT industry,
+including years of hands-on frontend development among other areas —
+every part of this project has been directed, reviewed, and tested with
+that background, not just prompted and shipped blind. It went through
+hours of real troubleshooting and debugging (live packet captures,
+PipeWire routing traces, before/after timing measurements, and more) to
+get the streaming pipeline actually solid, not just superficially working.
