@@ -25,14 +25,16 @@ jobs:
           ./build.sh
 
       - name: Zip the app bundle
+        env:
+          VERSION: ${{ github.ref_name }}  # e.g. v1.0.3
         run: |
           cd packaging/macos/dist
-          zip -r "EtherWave-Client-macOS.zip" "EtherWave Client.app"
+          zip -r "EtherWave-Client-macOS-${VERSION}.zip" "EtherWave Client.app"
 
       - uses: actions/upload-artifact@v4
         with:
           name: EtherWave-Client-macOS
-          path: packaging/macos/dist/EtherWave-Client-macOS.zip
+          path: packaging/macos/dist/EtherWave-Client-macOS-*.zip
 
   build-arch:
     runs-on: ubuntu-latest
@@ -45,6 +47,16 @@ jobs:
             pyside6 python-numpy libpulse pipewire pipewire-pulse
 
       - uses: actions/checkout@v4
+
+      - name: Set package version from git tag
+        run: |
+          # PKGBUILD's checked-in pkgver is just a sensible default for
+          # local `makepkg -si` builds -- for an actual release, the tag
+          # is the source of truth, so patch it in here rather than
+          # relying on someone remembering to bump the file every release.
+          VERSION="${GITHUB_REF_NAME#v}"  # v1.0.3 -> 1.0.3
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/arch/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
 
       - name: Build package as non-root (makepkg refuses to run as root)
         run: |

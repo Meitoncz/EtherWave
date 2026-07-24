@@ -7,8 +7,12 @@
 # server/audio_engine.py), not PortAudio, which can't see PipeWire's
 # virtual-sink monitor sources.
 
+# pkgver is a plain default for local `makepkg -si` builds. Actual GitHub
+# releases (.github/workflows/release.yml) patch it via sed to match the
+# pushed git tag, so it's always accurate there regardless of what's
+# checked in here -- bump it manually only to keep local builds sensible.
 pkgname=etherwave-server
-pkgver=1.0.0
+pkgver=1.0.3
 pkgrel=1
 pkgdesc="EtherWave: ultra-low-latency multichannel audio streaming server (PipeWire virtual sink -> LAN)"
 arch=('any')
