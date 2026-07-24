@@ -1,3 +1,8 @@
-PySide6>=6.6
+# PySide6-Essentials (not the full PySide6 meta-package) -- EtherWave only
+# uses QtCore/QtGui/QtWidgets, all in Essentials. The full "PySide6"
+# package also pulls in Addons (WebEngine, Qt3D, Charts, DataVisualization,
+# ...), which are unused here but add ~100+ MB to the PyInstaller macOS
+# bundle for nothing.
+PySide6-Essentials>=6.6
 sounddevice>=0.4.6
 numpy>=1.24
