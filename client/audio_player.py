@@ -33,6 +33,14 @@ DEFAULT_JITTER_MS = 20
 MIN_JITTER_MS = 5
 MAX_JITTER_MS = 50
 
+# Adaptive jitter sizing (opt-in, see JitterBuffer.adaptive_enabled): how
+# much to grow the margin on each resync, and how long a clean stretch has
+# to last before shrinking it back down by the same step. Kept within the
+# same MIN/MAX_JITTER_MS range as the manual slider -- automating movement
+# within an already-tested range, not exploring new extremes.
+ADAPTIVE_STEP_MS = 5
+ADAPTIVE_DECAY_INTERVAL_S = 15.0
+
 MIN_CHANNEL_GAIN_DB = -24
 MAX_CHANNEL_GAIN_DB = 24
 
@@ -131,6 +139,7 @@ class JitterBuffer:
         self.ring = np.zeros((self.capacity_frames, channels), dtype=np.float32)
         self._lock = threading.Lock()
 
+        self.jitter_ms = jitter_ms
         self.jitter_frames = int(jitter_ms / 1000.0 * samplerate)
         self.base_seq = None
         self.frames_per_packet = None
@@ -147,10 +156,19 @@ class JitterBuffer:
         self._drift_window = deque()
         self._drift_window_total = 0.0
         self._drift_window_bad = 0.0
+        # Adaptive jitter sizing, opt-in via the GUI checkbox (see pull()):
+        # off by default, so a fresh connection behaves exactly like before
+        # unless the user asks for it.
+        self.adaptive_enabled = False
+        self._clean_seconds = 0.0
+
+    def _set_jitter_ms_locked(self, ms: float):
+        self.jitter_ms = ms
+        self.jitter_frames = int(ms / 1000.0 * self.samplerate)
 
     def set_jitter_ms(self, ms: float):
         with self._lock:
-            self.jitter_frames = int(ms / 1000.0 * self.samplerate)
+            self._set_jitter_ms_locked(ms)
 
     def _write_ring(self, start_idx: int, data: np.ndarray):
         n = data.shape[0]
@@ -317,6 +335,27 @@ class JitterBuffer:
                 self._drift_window_total = 0.0
                 self._drift_window_bad = 0.0
 
+            # Adaptive jitter sizing (opt-in via the GUI checkbox): a
+            # resync is concrete evidence the current margin was too tight
+            # for whatever just happened, so grow it -- trading a little
+            # more latency for headroom automatically instead of making
+            # the user guess a single fixed value that has to suit both
+            # calm and bad-network conditions. A long clean stretch with no
+            # resync at all is the opposite signal, and shrinks the margin
+            # back down (recovering the latency) the same way, one step at
+            # a time in each direction rather than jumping straight to a
+            # bound.
+            if self.adaptive_enabled:
+                if did_resync:
+                    self._clean_seconds = 0.0
+                    if self.jitter_ms < MAX_JITTER_MS:
+                        self._set_jitter_ms_locked(min(MAX_JITTER_MS, self.jitter_ms + ADAPTIVE_STEP_MS))
+                else:
+                    self._clean_seconds += frame_count / self.samplerate
+                    if self._clean_seconds >= ADAPTIVE_DECAY_INTERVAL_S and self.jitter_ms > MIN_JITTER_MS:
+                        self._clean_seconds = 0.0
+                        self._set_jitter_ms_locked(max(MIN_JITTER_MS, self.jitter_ms - ADAPTIVE_STEP_MS))
+
             if available <= 0:
                 self.underruns += 1
                 self.read_frame += frame_count
@@ -379,6 +418,7 @@ class JitterBuffer:
             self._drift_window.clear()
             self._drift_window_total = 0.0
             self._drift_window_bad = 0.0
+            self._clean_seconds = 0.0
             self.ring.fill(0.0)
 
 

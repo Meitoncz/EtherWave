@@ -277,6 +277,12 @@ class ClientMainWindow(QMainWindow):
         jitter_row.addWidget(self.jitter_label)
         form.addRow("Jitter Buffer:", jitter_row)
 
+        self.adaptive_jitter_checkbox = QCheckBox(
+            "Adaptive (auto-grow on glitches, shrink back down when clean)"
+        )
+        self.adaptive_jitter_checkbox.toggled.connect(self._on_adaptive_jitter_toggled)
+        form.addRow("", self.adaptive_jitter_checkbox)
+
         root.addWidget(config_box)
 
         status_row = QHBoxLayout()
@@ -320,6 +326,9 @@ class ClientMainWindow(QMainWindow):
         jitter_ms = max(MIN_JITTER_MS, min(MAX_JITTER_MS, jitter_ms))
         self.jitter_slider.setValue(jitter_ms)
 
+        adaptive_jitter = self.settings.value("playback/adaptive_jitter", False, type=bool)
+        self.adaptive_jitter_checkbox.setChecked(adaptive_jitter)
+
         auto_connect = self.settings.value("discovery/auto_connect", False, type=bool)
         self.auto_connect_checkbox.setChecked(auto_connect)
 
@@ -335,6 +344,7 @@ class ClientMainWindow(QMainWindow):
 
     def _save_settings(self):
         self.settings.setValue("playback/jitter_ms", self.jitter_slider.value())
+        self.settings.setValue("playback/adaptive_jitter", self.adaptive_jitter_checkbox.isChecked())
         self.settings.setValue("discovery/auto_connect", self.auto_connect_checkbox.isChecked())
         device_data = self.device_combo.currentData()
         if device_data is not None:
@@ -418,6 +428,20 @@ class ClientMainWindow(QMainWindow):
         self.jitter_label.setText(f"{value} ms")
         if self.jitter_buffer is not None:
             self.jitter_buffer.set_jitter_ms(value)
+
+    def _on_adaptive_jitter_toggled(self, checked: bool):
+        # The slider stays disabled while adaptive, not because the value
+        # can't be read from it, but because the adaptive engine is what's
+        # driving it now (see _on_stats_updated) -- manual drags would just
+        # get overwritten on the next stats tick.
+        self.jitter_slider.setEnabled(not checked)
+        if self.jitter_buffer is not None:
+            self.jitter_buffer.adaptive_enabled = checked
+            if not checked:
+                # Stop wherever adaptive left it and hand control back to
+                # whatever the slider itself already shows.
+                self.jitter_buffer.set_jitter_ms(self.jitter_slider.value())
+        self._save_settings()
 
     def _toggle_connection(self):
         if self.connected_ip is not None:
@@ -550,6 +574,7 @@ class ClientMainWindow(QMainWindow):
             channels=server_channels,
             jitter_ms=self.jitter_slider.value(),
         )
+        self.jitter_buffer.adaptive_enabled = self.adaptive_jitter_checkbox.isChecked()
 
         self.receive_thread = NetworkReceiveThread(server_ip=ip, jitter_buffer=self.jitter_buffer)
         self.receive_thread.stats_updated.connect(self._on_stats_updated)
@@ -618,6 +643,21 @@ class ClientMainWindow(QMainWindow):
             f"Received: {_format_data_size(bytes_received)}    "
             f"Underruns: {underruns}    Resyncs: {resyncs}"
         )
+
+        # While adaptive, the jitter buffer's own engine is the one moving
+        # the target (see JitterBuffer.pull()) -- reflect its current value
+        # on the slider/label rather than the other way around. Signals are
+        # blocked for this: letting it through _on_jitter_changed would
+        # re-apply the same value right back (harmless) but also cascade
+        # into _save_settings on every tick, writing to disk continuously
+        # while adaptive is active instead of only on real user changes.
+        if self.jitter_buffer is not None and self.adaptive_jitter_checkbox.isChecked():
+            current_ms = int(round(self.jitter_buffer.jitter_ms))
+            if self.jitter_slider.value() != current_ms:
+                self.jitter_slider.blockSignals(True)
+                self.jitter_slider.setValue(current_ms)
+                self.jitter_slider.blockSignals(False)
+                self.jitter_label.setText(f"{current_ms} ms")
 
     def closeEvent(self, event):
         if not self._quitting:
