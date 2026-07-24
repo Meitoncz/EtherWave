@@ -592,9 +592,19 @@ class AudioOutputStream(QObject):
                 # devices/host APIs that default is "high" latency (can be
                 # several hundred ms), stacking invisibly on top of the
                 # jitter buffer (5-50ms) this app already manages, and
-                # nothing in the GUI's stats reflects it. "low" asks
-                # PortAudio for the device's minimum suggested latency.
-                latency="low",
+                # nothing in the GUI's stats reflects it. The symbolic "low"
+                # string isn't a fixed small number -- PortAudio maps it to
+                # the device's own self-reported "default low output
+                # latency", and for a macOS aggregate/virtual device (e.g.
+                # combining two independently-clocked USB interfaces via
+                # Loopback) that self-reported "low" value can itself still
+                # be conservatively large, to cover inter-device clock-drift
+                # compensation. Requesting an explicit small number of
+                # seconds instead asks CoreAudio for that literal buffer
+                # size regardless of what the device claims as its own
+                # default, matching what a purpose-built low-latency tool
+                # would request.
+                latency=self.blocksize / self.samplerate,
                 callback=self._callback,
             )
             self._stream.start()
