@@ -25,6 +25,3 @@ Thumbs.db
 .vscode/
 *.code-workspace
 .idea/
-
-# Local-only Claude Code guidance, not shared via the repo
-CLAUDE.md
