@@ -32,6 +32,9 @@ DEFAULT_JITTER_MS = 20
 MIN_JITTER_MS = 5
 MAX_JITTER_MS = 50
 
+MIN_CHANNEL_GAIN_DB = -10
+MAX_CHANNEL_GAIN_DB = 10
+
 
 def _downmix_matrix(rows):
     return np.array(rows, dtype=np.float32)
@@ -382,10 +385,33 @@ class AudioOutputStream(QObject):
         self.blocksize = blocksize
         self._stream = None
         self._last_emit = 0.0
+        # Per-output-channel linear gain, applied post-remap so it matches
+        # what the VU meters and channel labels in the GUI actually
+        # represent (physical output channels, not the server's source
+        # channels). A single float32 element write/read isn't behind a
+        # lock -- fine here since it's a plain scalar swap, not a
+        # multi-step update, and gain changes are infrequent UI actions,
+        # not something contended every callback.
+        self._channel_gains = np.ones(output_channels, dtype=np.float32)
+        self._gains_active = False  # skips the multiply/clip below when every channel is at 0dB
+
+    def set_channel_gain_db(self, channel_index: int, db: float):
+        if not (0 <= channel_index < self.output_channels):
+            return
+        db = max(MIN_CHANNEL_GAIN_DB, min(MAX_CHANNEL_GAIN_DB, db))
+        self._channel_gains[channel_index] = 10.0 ** (db / 20.0)
+        self._gains_active = not np.allclose(self._channel_gains, 1.0)
 
     def _callback(self, outdata, frames, time_info, status):
         block = self.jitter_buffer.pull(frames)
         remapped = remap_channels(block, self.output_channels)
+        if self._gains_active:
+            # remapped is always a fresh, single-use buffer for this
+            # callback (either pull()'s own np.zeros() or a freshly
+            # computed remix), so mutating it in place is safe and avoids
+            # allocating extra arrays on this realtime callback thread.
+            np.multiply(remapped, self._channel_gains, out=remapped)
+            np.clip(remapped, -1.0, 1.0, out=remapped)
         outdata[:] = remapped
 
         now = time.time()

@@ -15,6 +15,12 @@ PROJECT_ROOT = Path(SPECPATH).resolve().parent.parent
 CLIENT_DIR = PROJECT_ROOT / "client"
 ASSETS_DIR = PROJECT_ROOT / "assets"
 
+# Single source of truth for the version, patched by
+# .github/workflows/release.yml at release time (alongside PKGBUILD's
+# pkgver) so this .app's version metadata and client/gui.py's About dialog
+# (which reads the same bundled file at runtime) never drift out of sync.
+APP_VERSION = (ASSETS_DIR / "VERSION").read_text().strip()
+
 # EtherWave only imports QtCore/QtGui/QtWidgets (see client/gui.py etc.).
 # requirements.txt installs PySide6-Essentials rather than the full PySide6
 # meta-package for the same reason, but PyInstaller's PySide6 hook can still
@@ -40,7 +46,12 @@ a = Analysis(
     [str(CLIENT_DIR / "main.py")],
     pathex=[str(CLIENT_DIR)],
     binaries=[],
-    datas=[(str(ASSETS_DIR / "icon.png"), ".")],
+    datas=[
+        (str(ASSETS_DIR / "icon.png"), "."),
+        (str(ASSETS_DIR / "icon_tray_white.png"), "."),
+        (str(ASSETS_DIR / "icon_tray_black.png"), "."),
+        (str(ASSETS_DIR / "VERSION"), "."),
+    ],
     hiddenimports=["sounddevice", "numpy"],
     hookspath=[],
     hooksconfig={},
@@ -89,8 +100,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "EtherWave Client",
         "CFBundleDisplayName": "EtherWave Client",
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleVersion": "1.0.0",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "11.0",
         "NSLocalNetworkUsageDescription": (

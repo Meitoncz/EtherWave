@@ -1,22 +1,51 @@
 """
-Generates the EtherWave placeholder icon (a simple sound-wave mark) as a
-512x512 PNG via Pillow. Re-run this script to regenerate assets/icon.png if
-the design ever changes; nothing else in the project depends on Pillow at
-runtime, only at icon-generation time.
+Generates the EtherWave icon assets (a simple sound-wave mark) via Pillow:
+
+- icon.png: the full-color app/window/dock icon (512x512, gradient
+  background), used everywhere except the system tray.
+- icon_tray_white.png / icon_tray_black.png: flat, transparent-background
+  monochrome versions of just the wave mark (no background shape), sized
+  for tray/menu-bar use, since tray icons are conventionally simple
+  silhouettes that adapt to the OS's light/dark tray theme rather than a
+  fixed-color badge.
+
+Re-run this script to regenerate assets/ if the design ever changes;
+nothing else in the project depends on Pillow at runtime, only here.
 """
 
 from pathlib import Path
 from PIL import Image, ImageDraw
 
 SIZE = 512
-OUT_PATH = Path(__file__).parent / "icon.png"
+TRAY_SIZE = 256
+ASSETS_DIR = Path(__file__).parent
 
 BG_TOP = (14, 116, 144)      # teal-800
 BG_BOTTOM = (8, 47, 73)      # teal-950
 WAVE_COLOR = (226, 232, 240)  # slate-200
 
+# Symmetric bar heights (fraction of canvas height), shared by every variant.
+BAR_HEIGHTS_FRAC = [0.18, 0.34, 0.55, 0.72, 0.55, 0.34, 0.18]
 
-def generate() -> Image.Image:
+
+def _draw_wave_bars(draw: ImageDraw.ImageDraw, size: int, fill):
+    n_bars = len(BAR_HEIGHTS_FRAC)
+    bar_width = int(size * 0.055)
+    gap = int(size * 0.035)
+    total_width = n_bars * bar_width + (n_bars - 1) * gap
+    start_x = (size - total_width) // 2
+    center_y = size // 2
+
+    for i, hf in enumerate(BAR_HEIGHTS_FRAC):
+        bar_h = int(size * hf)
+        x0 = start_x + i * (bar_width + gap)
+        x1 = x0 + bar_width
+        y0 = center_y - bar_h // 2
+        y1 = center_y + bar_h // 2
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=bar_width // 2, fill=fill)
+
+
+def generate_app_icon() -> Image.Image:
     img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
@@ -39,26 +68,23 @@ def generate() -> Image.Image:
     )
     img.paste(bg, (0, 0), mask)
 
-    # Sound-wave bars: symmetric, varying heights, rounded caps.
-    n_bars = 7
-    bar_width = int(SIZE * 0.055)
-    gap = int(SIZE * 0.035)
-    total_width = n_bars * bar_width + (n_bars - 1) * gap
-    start_x = (SIZE - total_width) // 2
-    center_y = SIZE // 2
+    _draw_wave_bars(draw, SIZE, WAVE_COLOR)
+    return img
 
-    heights_frac = [0.18, 0.34, 0.55, 0.72, 0.55, 0.34, 0.18]
-    for i, hf in enumerate(heights_frac):
-        bar_h = int(SIZE * hf)
-        x0 = start_x + i * (bar_width + gap)
-        x1 = x0 + bar_width
-        y0 = center_y - bar_h // 2
-        y1 = center_y + bar_h // 2
-        draw.rounded_rectangle([x0, y0, x1, y1], radius=bar_width // 2, fill=WAVE_COLOR)
 
+def generate_tray_icon(color) -> Image.Image:
+    img = Image.new("RGBA", (TRAY_SIZE, TRAY_SIZE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    _draw_wave_bars(draw, TRAY_SIZE, color)
     return img
 
 
 if __name__ == "__main__":
-    generate().save(OUT_PATH)
-    print(f"wrote {OUT_PATH}")
+    generate_app_icon().save(ASSETS_DIR / "icon.png")
+    print(f"wrote {ASSETS_DIR / 'icon.png'}")
+
+    generate_tray_icon((255, 255, 255, 255)).save(ASSETS_DIR / "icon_tray_white.png")
+    print(f"wrote {ASSETS_DIR / 'icon_tray_white.png'}")
+
+    generate_tray_icon((0, 0, 0, 255)).save(ASSETS_DIR / "icon_tray_black.png")
+    print(f"wrote {ASSETS_DIR / 'icon_tray_black.png'}")

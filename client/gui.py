@@ -12,18 +12,19 @@ import sys
 from pathlib import Path
 
 import sounddevice as sd
-from PySide6.QtCore import Qt, QDateTime, QSettings
+from PySide6.QtCore import Qt, QDateTime, QSettings, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QComboBox, QPushButton, QSlider, QProgressBar, QPlainTextEdit,
     QFormLayout, QListWidget, QListWidgetItem, QSizePolicy, QCheckBox,
-    QSystemTrayIcon, QMenu, QStyle, QApplication,
+    QSystemTrayIcon, QMenu, QStyle, QApplication, QMessageBox, QSpinBox,
 )
 
 from audio_player import (
     JitterBuffer, NetworkReceiveThread, AudioOutputStream,
     DEFAULT_JITTER_MS, MIN_JITTER_MS, MAX_JITTER_MS,
+    MIN_CHANNEL_GAIN_DB, MAX_CHANNEL_GAIN_DB,
 )
 from discovery import DiscoveryListener
 
@@ -32,22 +33,61 @@ from discovery import DiscoveryListener
 SETTINGS_ORG = "EtherWave"
 SETTINGS_APP = "Client"
 
+def _find_asset_path(filename: str) -> str:
+    """Locates a file under assets/ whether running from source or frozen
+    via PyInstaller (macOS .app bundle).
 
-def _find_icon_path() -> str:
-    """Locates assets/icon.png whether running from source, frozen via
-    PyInstaller (macOS .app bundle), or otherwise installed."""
+    Every real deployment puts assets/ as a sibling of this file's own
+    directory: a source checkout has client/ and assets/ side by side, and
+    PyInstaller's _MEIPASS bundles them together (see
+    packaging/macos/EtherWaveClient.spec's datas=). No other path is ever
+    actually used by this project's packaging, so there's nothing else to
+    guess.
+    """
     candidates = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates.append(Path(meipass) / "icon.png")
+        candidates.append(Path(meipass) / filename)
     here = Path(__file__).resolve().parent
-    candidates.append(here.parent / "assets" / "icon.png")
-    candidates.append(Path("/usr/share/etherwave/icon.png"))
-    candidates.append(Path("/usr/share/pixmaps/etherwave.png"))
+    candidates.append(here.parent / "assets" / filename)
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
     return ""
+
+
+def _find_icon_path() -> str:
+    return _find_asset_path("icon.png")
+
+
+def _read_app_version() -> str:
+    """Reads assets/VERSION, the single source of truth patched by
+    .github/workflows/release.yml at release time (alongside PKGBUILD's
+    pkgver and the macOS .app's CFBundleShortVersionString) so this,
+    packaging/arch/PKGBUILD, and packaging/macos/EtherWaveClient.spec never
+    drift out of sync with each other or with the git tag."""
+    path = _find_asset_path("VERSION")
+    if not path:
+        return "dev"
+    try:
+        return Path(path).read_text().strip() or "dev"
+    except OSError:
+        return "dev"
+
+
+APP_VERSION = _read_app_version()
+
+
+def _tray_icon_path_for_scheme(scheme) -> str:
+    """Picks the monochrome tray icon variant for the current system color
+    scheme: tray/menu-bar icons are conventionally simple silhouettes that
+    adapt to the panel's theme rather than a fixed-color badge (unlike the
+    window/dock icon, which stays the full-color brand mark). Defaults to
+    the white variant when the platform can't report a scheme
+    (Qt.ColorScheme.Unknown)."""
+    variant = "black" if scheme == Qt.ColorScheme.Light else "white"
+    path = _find_asset_path(f"icon_tray_{variant}.png")
+    return path or _find_icon_path()
 
 
 class VUMeter(QProgressBar):
@@ -74,23 +114,62 @@ class VUMeter(QProgressBar):
 
 
 class VUMeterPanel(QWidget):
+    """A row of [VU meter + per-channel dB gain spinbox] columns, rebuilt
+    (and gain reset to 0 dB) whenever the channel count changes -- e.g. on
+    every new connection, since channel count/meaning depends on which
+    server/output device is in play."""
+
+    gain_changed = Signal(int, float)  # channel_index, db
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(4, 4, 4, 4)
         self._meters = []
+        self._gain_spins = []
         self.set_channels(2)
 
     def set_channels(self, channels: int):
         while self._layout.count():
             item = self._layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            item.widget().deleteLater()
         self._meters = []
+        self._gain_spins = []
         for i in range(channels):
-            meter = VUMeter(str(i + 1))
+            label = str(i + 1)
+            # A plain QWidget (not a bare QVBoxLayout) so Qt's parent/child
+            # ownership cascades deleteLater() to the meter and spinbox
+            # automatically on the next set_channels() call, instead of
+            # needing to walk into each column by hand to clear it.
+            column = QWidget()
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+
+            meter = VUMeter(label)
             self._meters.append(meter)
-            self._layout.addWidget(meter)
+            column_layout.addWidget(meter)
+
+            gain_spin = QSpinBox()
+            gain_spin.setRange(MIN_CHANNEL_GAIN_DB, MAX_CHANNEL_GAIN_DB)
+            gain_spin.setValue(0)
+            gain_spin.setSuffix(" dB")
+            gain_spin.setToolTip(f"Channel {label} volume trim")
+            gain_spin.setMaximumWidth(70)
+            gain_spin.setAlignment(Qt.AlignCenter)
+            gain_spin.valueChanged.connect(
+                lambda db, idx=i: self.gain_changed.emit(idx, float(db))
+            )
+            self._gain_spins.append(gain_spin)
+            column_layout.addWidget(gain_spin, alignment=Qt.AlignHCenter)
+
+            self._layout.addWidget(column)
+
+    def gains_db(self) -> list:
+        return [spin.value() for spin in self._gain_spins]
+
+    def set_gains_db(self, gains):
+        for spin, db in zip(self._gain_spins, gains):
+            spin.setValue(int(db))
 
     def update_levels(self, levels):
         for meter, peak in zip(self._meters, levels):
@@ -114,6 +193,15 @@ class ClientMainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("EtherWave Client")
         self.resize(600, 560)
+
+        # Without an explicit window icon, Wayland compositors have nothing
+        # to show in the taskbar/dock for this window and fall back to a
+        # generic placeholder (on macOS the .app bundle's .icns already
+        # covers the Dock icon, so this mainly matters when running from
+        # source on Linux).
+        app_icon_path = _find_icon_path()
+        if app_icon_path:
+            self.setWindowIcon(QIcon(app_icon_path))
 
         self.settings = QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
                                    SETTINGS_ORG, SETTINGS_APP)
@@ -189,6 +277,7 @@ class ClientMainWindow(QMainWindow):
         meter_box = QGroupBox("Levels")
         meter_layout = QVBoxLayout(meter_box)
         self.vu_panel = VUMeterPanel()
+        self.vu_panel.gain_changed.connect(self._on_channel_gain_changed)
         meter_layout.addWidget(self.vu_panel)
         root.addWidget(meter_box, stretch=1)
 
@@ -240,6 +329,25 @@ class ClientMainWindow(QMainWindow):
         if device_data is not None:
             self.settings.setValue("playback/output_device", device_data[2])
         self.settings.sync()
+
+    def _on_channel_gain_changed(self, channel_index: int, db: float):
+        if self.output_stream is not None:
+            self.output_stream.set_channel_gain_db(channel_index, db)
+        gains = self.vu_panel.gains_db()
+        self.settings.setValue(f"playback/channel_gains_{len(gains)}ch",
+                                ",".join(str(g) for g in gains))
+        self.settings.sync()
+
+    def _load_channel_gains(self, channels: int):
+        saved = self.settings.value(f"playback/channel_gains_{channels}ch", "", type=str)
+        if not saved:
+            return
+        try:
+            gains = [int(x) for x in saved.split(",")]
+        except ValueError:
+            return
+        if len(gains) == channels:
+            self.vu_panel.set_gains_db(gains)
 
     def _on_servers_updated(self, servers: dict):
         previous_selection = None
@@ -307,14 +415,12 @@ class ClientMainWindow(QMainWindow):
             self._connect()
 
     def _setup_tray_icon(self):
-        icon_path = _find_icon_path()
-        if icon_path:
-            icon = QIcon(icon_path)
-        else:
-            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume)
-
-        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setToolTip("EtherWave Client")
+        self._update_tray_icon()
+
+        style_hints = QApplication.instance().styleHints()
+        style_hints.colorSchemeChanged.connect(self._update_tray_icon)
 
         menu = QMenu()
         open_action = menu.addAction("Open EtherWave")
@@ -327,12 +433,22 @@ class ClientMainWindow(QMainWindow):
         self.tray_pause_action.triggered.connect(self._toggle_connection)
 
         menu.addSeparator()
+        about_action = menu.addAction("About")
+        about_action.triggered.connect(self._show_about)
         close_action = menu.addAction("Close")
         close_action.triggered.connect(self._quit_from_tray)
 
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+
+    def _update_tray_icon(self):
+        scheme = QApplication.instance().styleHints().colorScheme()
+        icon_path = _tray_icon_path_for_scheme(scheme)
+        if icon_path:
+            self.tray_icon.setIcon(QIcon(icon_path))
+        else:
+            self.tray_icon.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
 
     def _show_from_tray(self):
         self.showNormal()
@@ -342,6 +458,19 @@ class ClientMainWindow(QMainWindow):
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._show_from_tray()
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "About EtherWave Client",
+            "<h3>EtherWave Client</h3>"
+            f"<p>Version {APP_VERSION}</p>"
+            "<p>Ultra-low-latency multichannel audio streaming from a "
+            "CachyOS/PipeWire server to this Mac.</p>"
+            "<p>License: MIT</p>"
+            '<p><a href="https://github.com/Meitoncz/EtherWave">'
+            "github.com/Meitoncz/EtherWave</a></p>",
+        )
 
     def _quit_from_tray(self):
         self._quitting = True
@@ -411,6 +540,7 @@ class ClientMainWindow(QMainWindow):
         self.output_stream.levels_changed.connect(self.vu_panel.update_levels)
         self.output_stream.error_occurred.connect(self._log)
         self.vu_panel.set_channels(output_channels)
+        self._load_channel_gains(output_channels)
         self.output_stream.start()
 
         self.connected_ip = ip

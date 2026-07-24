@@ -18,6 +18,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set app version from git tag
+        run: |
+          # assets/VERSION is the single source of truth read by both GUIs'
+          # About dialog and this .app's Info.plist (see
+          # EtherWaveClient.spec) -- keep it in sync with the tag the same
+          # way the Arch job keeps PKGBUILD's pkgver in sync, rather than
+          # trusting whatever version happened to be checked in.
+          echo "${GITHUB_REF_NAME#v}" > assets/VERSION  # v1.0.3 -> 1.0.3
+
       - name: Build EtherWave Client.app
         run: |
           cd packaging/macos
@@ -54,9 +63,13 @@ jobs:
           # local `makepkg -si` builds -- for an actual release, the tag
           # is the source of truth, so patch it in here rather than
           # relying on someone remembering to bump the file every release.
+          # assets/VERSION is read by server/gui.py's About dialog at
+          # runtime (gets copied into the package by the `cp -r assets`
+          # step in PKGBUILD's package()), kept in sync the same way.
           VERSION="${GITHUB_REF_NAME#v}"  # v1.0.3 -> 1.0.3
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/arch/PKGBUILD
           sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
+          echo "${VERSION}" > assets/VERSION
 
       - name: Build package as non-root (makepkg refuses to run as root)
         run: |

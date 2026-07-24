@@ -18,27 +18,69 @@ from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QComboBox, QPushButton, QSpinBox, QProgressBar, QPlainTextEdit,
     QFormLayout, QSizePolicy, QSystemTrayIcon, QMenu, QStyle, QApplication,
+    QMessageBox,
 )
 
 from audio_engine import AUDIO_PORT, AudioCaptureThread, PipeWireSinkManager
 from discovery import DiscoveryBroadcaster
 
 
-def _find_icon_path() -> str:
-    """Locates assets/icon.png whether running from source, frozen via
-    PyInstaller, or installed as a system package (Arch PKGBUILD)."""
+def _find_asset_path(filename: str) -> str:
+    """Locates a file under assets/ whether running from source, frozen via
+    PyInstaller, or installed as a system package (Arch PKGBUILD).
+
+    Every real deployment puts assets/ as a sibling of this file's own
+    directory: a source checkout has server/ and assets/ side by side,
+    PyInstaller's _MEIPASS bundles them together, and PKGBUILD's
+    `cp -r assets ...` installs them next to server/ under
+    /usr/share/etherwave-server/. No other system path is ever actually
+    used by this project's packaging, so there's nothing else to guess.
+    """
     candidates = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates.append(Path(meipass) / "icon.png")
+        candidates.append(Path(meipass) / filename)
     here = Path(__file__).resolve().parent
-    candidates.append(here.parent / "assets" / "icon.png")
-    candidates.append(Path("/usr/share/etherwave/icon.png"))
-    candidates.append(Path("/usr/share/pixmaps/etherwave.png"))
+    candidates.append(here.parent / "assets" / filename)
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
     return ""
+
+
+def _find_icon_path() -> str:
+    return _find_asset_path("icon.png")
+
+
+def _read_app_version() -> str:
+    """Reads assets/VERSION, the single source of truth patched by
+    .github/workflows/release.yml at release time (alongside PKGBUILD's
+    pkgver and the macOS .app's CFBundleShortVersionString) so this,
+    packaging/arch/PKGBUILD, and packaging/macos/EtherWaveClient.spec never
+    drift out of sync with each other or with the git tag."""
+    path = _find_asset_path("VERSION")
+    if not path:
+        return "dev"
+    try:
+        return Path(path).read_text().strip() or "dev"
+    except OSError:
+        return "dev"
+
+
+APP_VERSION = _read_app_version()
+
+
+def _tray_icon_path_for_scheme(scheme) -> str:
+    """Picks the monochrome tray icon variant for the current system color
+    scheme: tray icons are conventionally simple silhouettes that adapt to
+    the panel's theme rather than a fixed-color badge (unlike the window/
+    dock icon, which stays the full-color brand mark). Defaults to the
+    white variant when the platform can't report a scheme (Qt.ColorScheme.
+    Unknown, e.g. some window managers/offscreen) since dark panels are the
+    more common default across Linux desktop environments."""
+    variant = "black" if scheme == Qt.ColorScheme.Light else "white"
+    path = _find_asset_path(f"icon_tray_{variant}.png")
+    return path or _find_icon_path()
 
 CHANNEL_LAYOUTS = OrderedDict([
     (2, "Stereo (2.0)"),
@@ -121,6 +163,15 @@ class ServerMainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("EtherWave Server")
         self.resize(560, 480)
+
+        # Without an explicit window icon, Wayland compositors (e.g. KDE
+        # Plasma) have nothing to show in the taskbar/dock for this window
+        # and fall back to a generic placeholder icon -- this, together
+        # with QApplication.setDesktopFileName() in main.py, is what lets
+        # the compositor resolve the real app icon there.
+        app_icon_path = _find_icon_path()
+        if app_icon_path:
+            self.setWindowIcon(QIcon(app_icon_path))
 
         self.settings = QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
                                    SETTINGS_ORG, SETTINGS_APP)
@@ -241,14 +292,12 @@ class ServerMainWindow(QMainWindow):
         self.tray_pause_action.setEnabled(True)
 
     def _setup_tray_icon(self):
-        icon_path = _find_icon_path()
-        if icon_path:
-            icon = QIcon(icon_path)
-        else:
-            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume)
-
-        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setToolTip("EtherWave Server")
+        self._update_tray_icon()
+
+        style_hints = QApplication.instance().styleHints()
+        style_hints.colorSchemeChanged.connect(self._update_tray_icon)
 
         menu = QMenu()
         open_action = menu.addAction("Open EtherWave")
@@ -261,12 +310,22 @@ class ServerMainWindow(QMainWindow):
         self.tray_pause_action.setEnabled(False)  # enabled once _set_running_state runs
 
         menu.addSeparator()
+        about_action = menu.addAction("About")
+        about_action.triggered.connect(self._show_about)
         close_action = menu.addAction("Close")
         close_action.triggered.connect(self._quit_from_tray)
 
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+
+    def _update_tray_icon(self):
+        scheme = QApplication.instance().styleHints().colorScheme()
+        icon_path = _tray_icon_path_for_scheme(scheme)
+        if icon_path:
+            self.tray_icon.setIcon(QIcon(icon_path))
+        else:
+            self.tray_icon.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
 
     def _show_from_tray(self):
         self.showNormal()
@@ -276,6 +335,19 @@ class ServerMainWindow(QMainWindow):
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._show_from_tray()
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "About EtherWave Server",
+            "<h3>EtherWave Server</h3>"
+            f"<p>Version {APP_VERSION}</p>"
+            "<p>Ultra-low-latency multichannel audio streaming from a "
+            "CachyOS/PipeWire server to a LAN client.</p>"
+            "<p>License: MIT</p>"
+            '<p><a href="https://github.com/Meitoncz/EtherWave">'
+            "github.com/Meitoncz/EtherWave</a></p>",
+        )
 
     def _quit_from_tray(self):
         self._quitting = True
