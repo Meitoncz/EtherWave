@@ -65,10 +65,22 @@ jobs:
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           su builder -c "cd packaging/arch && makepkg -f --noconfirm"
 
+      - name: Rename release asset for consistent naming
+        run: |
+          # The actual Arch package name/file (etherwave-server-*, all
+          # lowercase) is unchanged -- that's an Arch packaging convention
+          # (pkgname must be lowercase), not a style choice, and pacman
+          # reads the package metadata, not the filename, so renaming the
+          # downloadable copy is purely cosmetic and doesn't affect
+          # installability. This just makes the two release assets read
+          # consistently on the GitHub Releases page.
+          original=$(ls packaging/arch/*.pkg.tar.zst)
+          cp "$original" "packaging/arch/EtherWave-Server-Arch-${GITHUB_REF_NAME}.pkg.tar.zst"
+
       - uses: actions/upload-artifact@v4
         with:
           name: EtherWave-Server-Arch
-          path: packaging/arch/*.pkg.tar.zst
+          path: packaging/arch/EtherWave-Server-Arch-*.pkg.tar.zst
 
   create-release:
     needs: [build-macos, build-arch]
