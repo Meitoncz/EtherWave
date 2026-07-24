@@ -587,6 +587,14 @@ class AudioOutputStream(QObject):
                 samplerate=self.samplerate,
                 blocksize=self.blocksize,
                 dtype="float32",
+                # Without an explicit latency, PortAudio/CoreAudio picks its
+                # own default output buffer for the device -- on some macOS
+                # devices/host APIs that default is "high" latency (can be
+                # several hundred ms), stacking invisibly on top of the
+                # jitter buffer (5-50ms) this app already manages, and
+                # nothing in the GUI's stats reflects it. "low" asks
+                # PortAudio for the device's minimum suggested latency.
+                latency="low",
                 callback=self._callback,
             )
             self._stream.start()
