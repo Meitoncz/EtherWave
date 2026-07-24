@@ -15,8 +15,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QDateTime, QSettings, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QComboBox, QPushButton, QSpinBox, QProgressBar, QPlainTextEdit,
+    QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
+    QLabel, QComboBox, QPushButton, QSpinBox, QProgressBar, QPlainTextEdit,
     QFormLayout, QSizePolicy, QSystemTrayIcon, QMenu, QStyle, QApplication,
     QMessageBox,
 )
@@ -95,6 +95,42 @@ def _format_data_size(num_bytes) -> str:
     if mb >= 1000:
         return f"{mb / 1024:.2f} GB"
     return f"{mb:.2f} MB"
+
+
+def _build_stats_row(specs, column_width: int = 150):
+    """Builds a caption-over-value grid of *equal-width* columns, centered
+    by the caller (Qt.AlignHCenter). Every column shares the same fixed
+    width regardless of its own caption/value length -- a column sized to
+    fit only its own longest content leaves lopsided empty space around
+    shorter captions, which reads as the whole row being off-center even
+    though its bounding box is genuinely centered. Kept in sync by hand
+    with client/gui.py's copy of this same function (see CLAUDE.md on why
+    there's no shared module between the two apps).
+
+    specs: list of (key, caption) tuples.
+    Returns (container_widget, {key: value_QLabel}).
+    """
+    container = QWidget()
+    grid = QGridLayout(container)
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(24)
+    grid.setVerticalSpacing(2)
+    values = {}
+    for col, (key, caption) in enumerate(specs):
+        cap_label = QLabel(caption)
+        cap_label.setAlignment(Qt.AlignCenter)
+        cap_label.setFixedWidth(column_width)
+        cap_label.setStyleSheet("color: #666; font-size: 10px; font-weight: bold;")
+        grid.addWidget(cap_label, 0, col)
+
+        val_label = QLabel("--")
+        val_label.setAlignment(Qt.AlignCenter)
+        val_label.setFixedWidth(column_width)
+        val_label.setWordWrap(True)
+        val_label.setStyleSheet("color: #888;")
+        grid.addWidget(val_label, 1, col)
+        values[key] = val_label
+    return container, values
 
 
 CHANNEL_LAYOUTS = OrderedDict([
@@ -256,10 +292,19 @@ class ServerMainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
+        central.setStyleSheet(
+            "QGroupBox { font-size: 13px; font-weight: 600; margin-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+        )
         root = QVBoxLayout(central)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(24)
 
         config_box = QGroupBox("Stream Configuration")
         form = QFormLayout(config_box)
+        form.setContentsMargins(14, 22, 14, 14)
+        form.setVerticalSpacing(12)
+        form.setHorizontalSpacing(12)
 
         self.channel_combo = QComboBox()
         for channels, label in CHANNEL_LAYOUTS.items():
@@ -292,16 +337,21 @@ class ServerMainWindow(QMainWindow):
 
         meter_box = QGroupBox("Levels")
         meter_layout = QVBoxLayout(meter_box)
+        meter_layout.setContentsMargins(14, 22, 14, 14)
         self.vu_panel = VUMeterPanel()
         meter_layout.addWidget(self.vu_panel)
         root.addWidget(meter_box, stretch=1)
 
-        self.stats_label = QLabel("Latency: ~0.0 ms    Packets sent: 0    Data sent: 0.0 MB")
-        self.stats_label.setStyleSheet("color: #888;")
-        root.addWidget(self.stats_label)
+        stats_widget, self.stat_labels = _build_stats_row([
+            ("latency", "LATENCY"),
+            ("packets", "PACKETS SENT"),
+            ("sent", "DATA SENT"),
+        ], column_width=150)
+        root.addWidget(stats_widget, alignment=Qt.AlignHCenter)
 
         log_box = QGroupBox("Log")
         log_layout = QVBoxLayout(log_box)
+        log_layout.setContentsMargins(14, 22, 14, 14)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
@@ -514,10 +564,9 @@ class ServerMainWindow(QMainWindow):
 
     def _on_stats_updated(self, packets_sent: int, bytes_sent: int):
         latency_ms = self.blocksize_spin.value() / 48000.0 * 1000.0
-        self.stats_label.setText(
-            f"Latency: ~{latency_ms:.1f} ms    Packets sent: {packets_sent}    "
-            f"Data sent: {_format_data_size(bytes_sent)}"
-        )
+        self.stat_labels["latency"].setText(f"~{latency_ms:.1f} ms")
+        self.stat_labels["packets"].setText(str(packets_sent))
+        self.stat_labels["sent"].setText(_format_data_size(bytes_sent))
 
     def closeEvent(self, event):
         if not self._quitting:

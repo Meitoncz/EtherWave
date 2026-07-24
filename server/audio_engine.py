@@ -59,6 +59,11 @@ PAREC_LAUNCH_RETRIES = 5
 PAREC_LAUNCH_RETRY_DELAY = 0.4
 PAREC_STARTUP_GRACE = 0.3
 
+# How many whole packets' worth of data are allowed to sit in read_buffer
+# before it's treated as stale backlog to drop rather than a normal burst.
+# See the trim logic in AudioCaptureThread.run() for why this exists.
+BACKLOG_TRIM_THRESHOLD_CHUNKS = 3
+
 
 class PipeWireSinkManager:
     """Creates/destroys a null-sink virtual device via `pactl` subprocess calls."""
@@ -355,10 +360,53 @@ class AudioCaptureThread(QThread):
                 if not ready:
                     continue
 
-                chunk = proc.stdout.read(chunk_bytes - len(read_buffer))
+                # Deliberately NOT `read(chunk_bytes - len(read_buffer))`:
+                # that caps every single read to at most one chunk's worth,
+                # even when parec has far more than that already sitting in
+                # the pipe (it delivers in bursts -- see the pacing
+                # comment below). read() on a pipe returns as soon as
+                # anything is available, up to the requested size, so
+                # asking for far more than one chunk is free when only one
+                # chunk is actually ready -- but it's exactly what lets a
+                # backlog that builds up in the pipe (from this thread
+                # being a little slow for even one iteration -- GIL
+                # contention with the Qt main thread, a scheduling
+                # hiccup) get fully drained in one go instead of being
+                # structurally limited to clawing back one chunk per
+                # outer-loop iteration forever. Measured directly: with
+                # the one-chunk cap, real end-to-end latency (a trigger on
+                # this machine to audible output, measured independently
+                # of this app on both ends) was ~350ms within minutes of a
+                # fresh start and grew to ~900ms over ~80 minutes.
+                chunk = proc.stdout.read(chunk_bytes * 16)
                 if not chunk:
                     continue
                 read_buffer += chunk
+
+                # Drop stale backlog instead of replaying it at the correct
+                # rate but shifted in time. Measured directly: even with
+                # behind_schedule_ms sitting at ~0 (the pacing loop below is
+                # NOT falling behind wall-clock), read_buffer held a rock
+                # steady 11-12 chunks (~55-60ms) pending indefinitely. That
+                # existing catch-up branch only fires when we fall behind
+                # the *schedule*; it can never fire here because the
+                # schedule itself is fine -- the data being sent is simply
+                # stale, a phase offset baked in by whatever burst parec (or
+                # PipeWire handing off its monitor buffer on first connect)
+                # delivered before our very first read, which then just
+                # perpetuates forever since we drain at exactly the rate
+                # it's produced. Trimming down to the single newest chunk
+                # whenever backlog exceeds a small allowance (bursts of 2-3
+                # chunks together are normal/expected, per the pacing
+                # comment above) re-anchors the schedule to now and lets the
+                # client's jitter buffer absorb the resulting seq gap the
+                # same way it already absorbs an ordinary network hiccup.
+                pending_chunks = len(read_buffer) // chunk_bytes
+                if pending_chunks > BACKLOG_TRIM_THRESHOLD_CHUNKS:
+                    drop_chunks = pending_chunks - 1
+                    read_buffer = read_buffer[drop_chunks * chunk_bytes:]
+                    seq += drop_chunks
+                    next_send_time = time.perf_counter()
 
                 while len(read_buffer) >= chunk_bytes:
                     frame_bytes = read_buffer[:chunk_bytes]

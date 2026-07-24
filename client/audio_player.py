@@ -560,6 +560,21 @@ class AudioOutputStream(QObject):
         self._channel_gains[channel_index] = 10.0 ** (db / 20.0)
         self._gains_active = not np.allclose(self._channel_gains, 1.0)
 
+    @property
+    def output_latency_ms(self) -> float:
+        """CoreAudio/PortAudio's own actual (negotiated, not requested)
+        output buffering, in milliseconds. This sits downstream of the
+        JitterBuffer entirely -- get_buffered_ms() only reports what's
+        queued in the ring, not what happens to audio after pull() hands
+        it to this stream -- so the two need to be added together for a
+        real picture of this device's contribution to end-to-end latency."""
+        if self._stream is None:
+            return 0.0
+        try:
+            return float(self._stream.latency) * 1000.0
+        except (AttributeError, TypeError):
+            return 0.0
+
     def _callback(self, outdata, frames, time_info, status):
         block = self.jitter_buffer.pull(frames)
         remapped = remap_channels(block, self.output_channels)
