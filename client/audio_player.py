@@ -284,6 +284,12 @@ class NetworkReceiveThread(QThread):
         self._stop_flag = True
 
     def run(self):
+        # Best-effort scheduling hint, mirroring the server's capture
+        # thread: favor this thread so a brief load spike elsewhere on the
+        # Mac is less likely to delay draining the socket long enough to
+        # cause an audible gap. Safe no-op if the OS ignores it.
+        self.setPriority(QThread.Priority.TimeCriticalPriority)
+
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

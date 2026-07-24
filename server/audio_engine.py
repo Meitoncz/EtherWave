@@ -186,7 +186,13 @@ class AudioCaptureThread(QThread):
             f"--rate={self.samplerate}",
             f"--channels={self.channels}",
             f"--channel-map={CHANNEL_MAPS[self.channels]}",
-            "--latency-msec=10",
+            # A bit more headroom than the theoretical minimum: gives our
+            # own read loop (below) more slack to fall behind briefly
+            # (e.g. during a CPU-heavy moment elsewhere on the system,
+            # like shader compilation) before parec's own client buffer
+            # overflows and drops samples at the source -- an xrun there
+            # is real, unrecoverable audio loss, not just added latency.
+            "--latency-msec=20",
         ]
         last_stderr = ""
         for attempt in range(PAREC_LAUNCH_RETRIES):
@@ -221,6 +227,13 @@ class AudioCaptureThread(QThread):
         return None
 
     def run(self):
+        # Best-effort: ask the OS scheduler to favor this thread over
+        # normal-priority work (e.g. a game compiling shaders on other
+        # cores), so reading parec's pipe is less likely to be delayed
+        # long enough to cause an audible gap. Purely a scheduling hint --
+        # safe no-op if the platform/OS ignores it.
+        self.setPriority(QThread.Priority.TimeCriticalPriority)
+
         self.status_changed.emit(f"Starting capture of '{self.sink_name}.monitor'...")
         proc = self._launch_parec()
         if proc is None:
