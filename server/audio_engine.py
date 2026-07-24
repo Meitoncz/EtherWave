@@ -74,11 +74,49 @@ class PipeWireSinkManager:
     def is_active(self) -> bool:
         return self._module_id is not None
 
+    def _cleanup_stale_modules(self):
+        """Unloads any pre-existing 'EtherWave_Sink' null-sink module(s),
+        regardless of whether *this* process created them.
+
+        _module_id only tracks what this process instance itself created.
+        If a previous instance crashed (or was restarted by systemd's
+        Restart=on-failure in the packaged service) without going through
+        remove_sink(), its module keeps running as an orphan under the same
+        name. PipeWire allows duplicate sink names and resolves them
+        ambiguously, so name-based lookups (parec --device=..., an app
+        auto-connecting to "EtherWave_Sink") can silently land on the
+        orphan instead of the live one -- this was observed directly: a
+        RUNNING sink actually in use alongside a SUSPENDED orphan of the
+        same name from an earlier crashed instance. Symptoms match exactly
+        what users reported: intermittent random distortion (ambiguous
+        resolution) and "stream active but nothing plays" (a newly-started
+        app landing on the orphan instead of the one actually being
+        captured). Running this unconditionally at every create_sink()
+        call, independent of in-memory state, makes startup self-healing
+        regardless of prior crash history.
+        """
+        try:
+            result = subprocess.run(["pactl", "list", "short", "modules"],
+                                     capture_output=True, text=True, timeout=5)
+        except (subprocess.SubprocessError, OSError):
+            return
+        target = f"sink_name={self.SINK_NAME}"
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) < 3:
+                continue
+            module_id, module_name, args = fields[0], fields[1], fields[2]
+            if module_name == "module-null-sink" and target in args:
+                subprocess.run(["pactl", "unload-module", module_id],
+                                capture_output=True, timeout=5)
+
     def create_sink(self, channels: int) -> int:
         if channels not in CHANNEL_MAPS:
             raise ValueError(f"Unsupported channel count: {channels}")
         if self._module_id is not None:
             raise RuntimeError("Sink already active; remove it before creating a new one")
+
+        self._cleanup_stale_modules()
 
         try:
             result = subprocess.run(
@@ -186,13 +224,16 @@ class AudioCaptureThread(QThread):
             f"--rate={self.samplerate}",
             f"--channels={self.channels}",
             f"--channel-map={CHANNEL_MAPS[self.channels]}",
-            # A bit more headroom than the theoretical minimum: gives our
-            # own read loop (below) more slack to fall behind briefly
-            # (e.g. during a CPU-heavy moment elsewhere on the system,
-            # like shader compilation) before parec's own client buffer
-            # overflows and drops samples at the source -- an xrun there
-            # is real, unrecoverable audio loss, not just added latency.
-            "--latency-msec=20",
+            # Reverted from 20ms back to the original 10ms: raising it was
+            # a speculative guard against CPU contention that a controlled
+            # test never actually confirmed (synthetic load never budged
+            # per-core or aggregate CPU% on the real hardware), while the
+            # added latency was real and directly felt during use. Not
+            # worth trading confirmed latency for a hypothetical, unproven
+            # benefit -- the actual root cause found for the reported
+            # glitches was duplicate PipeWire sink instances (see
+            # _cleanup_stale_modules), not capture-buffer starvation.
+            "--latency-msec=10",
         ]
         last_stderr = ""
         for attempt in range(PAREC_LAUNCH_RETRIES):
