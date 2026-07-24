@@ -190,7 +190,18 @@ class AudioCaptureThread(QThread):
     levels_changed = Signal(list)
     status_changed = Signal(str)
     error_occurred = Signal(str)
-    stats_updated = Signal(int, int)  # packets_sent, bytes_sent
+    # bytes_sent is declared as `object`, not `int`: Qt/shiboken marshals a
+    # plain `int` signal argument into a 32-bit C `int` (max ~2.1 billion),
+    # and this counter is an unbounded running total for the life of the
+    # stream -- at ~1.15 MB/s (6ch/48kHz/float32) it crosses that limit
+    # after ~31 minutes of continuous streaming. Past that point every
+    # single emit() raised OverflowError right inside the packet-pacing
+    # loop (see the `next_send_time` scheduling just above), repeatedly,
+    # for the rest of the session -- exactly the kind of per-packet
+    # overhead that disrupts the pacing this project depends on for
+    # smooth playback. `object` passes the Python int through unmarshaled,
+    # with no width limit.
+    stats_updated = Signal(int, object)  # packets_sent, bytes_sent
 
     def __init__(self, channels: int, sink_name: str, samplerate: int = 48000,
                  blocksize: int = 240, audio_port: int = AUDIO_PORT,
