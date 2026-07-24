@@ -78,6 +78,17 @@ def _read_app_version() -> str:
 APP_VERSION = _read_app_version()
 
 
+def _format_data_size(num_bytes) -> str:
+    """Formats a byte count as MB, switching to GB past 1000 MB -- kept in
+    sync by hand with server/gui.py's copy of this same function, the same
+    way the wire protocol constants are (see CLAUDE.md): no shared module
+    exists between the two independently-deployed apps."""
+    mb = num_bytes / (1024 * 1024)
+    if mb >= 1000:
+        return f"{mb / 1024:.2f} GB"
+    return f"{mb:.2f} MB"
+
+
 def _tray_icon_path_for_scheme(scheme) -> str:
     """Picks the monochrome tray icon variant for the current system color
     scheme: tray/menu-bar icons are conventionally simple silhouettes that
@@ -599,11 +610,12 @@ class ClientMainWindow(QMainWindow):
         self.vu_panel.update_levels([0.0] * len(self.vu_panel._meters))
         self._log("Disconnected")
 
-    def _on_stats_updated(self, latency_ms: float, packets_received: int):
+    def _on_stats_updated(self, buffered_ms: float, packets_received: int, bytes_received: int):
         underruns = self.jitter_buffer.underruns if self.jitter_buffer else 0
         resyncs = self.jitter_buffer.resyncs if self.jitter_buffer else 0
         self.stats_label.setText(
-            f"Latency: {latency_ms:.1f} ms    Packets: {packets_received}    "
+            f"Buffered: {buffered_ms:.1f} ms    Packets: {packets_received}    "
+            f"Received: {_format_data_size(bytes_received)}    "
             f"Underruns: {underruns}    Resyncs: {resyncs}"
         )
 

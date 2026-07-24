@@ -40,6 +40,9 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 SAMPLE_DTYPE = np.float32
 BYTES_PER_SAMPLE = 4
 
+MIN_CHANNEL_GAIN_DB = -24
+MAX_CHANNEL_GAIN_DB = 24
+
 # Channel layout name -> PulseAudio/PipeWire channel_map string
 CHANNEL_MAPS = {
     2: "front-left,front-right",
@@ -216,6 +219,24 @@ class AudioCaptureThread(QThread):
         self._stop_flag = False
         self._packets_sent = 0
         self._bytes_sent = 0
+        # Per-source-channel linear gain, applied to captured audio before
+        # it's packed into a packet -- lets the source mix be trimmed at
+        # the server (e.g. a channel that's just quieter at the capture
+        # source) independently of whatever gain trim the client applies
+        # on its own end for its physical output channels. A single
+        # float32 element write/read isn't behind a lock -- fine here
+        # since it's a plain scalar swap, not a multi-step update, and
+        # gain changes are infrequent UI actions, not something contended
+        # every packet.
+        self._channel_gains = np.ones(channels, dtype=np.float32)
+        self._gains_active = False  # skips the multiply/clip below when every channel is at 0dB
+
+    def set_channel_gain_db(self, channel_index: int, db: float):
+        if not (0 <= channel_index < self.channels):
+            return
+        db = max(MIN_CHANNEL_GAIN_DB, min(MAX_CHANNEL_GAIN_DB, db))
+        self._channel_gains[channel_index] = 10.0 ** (db / 20.0)
+        self._gains_active = not np.allclose(self._channel_gains, 1.0)
 
     def stop(self):
         self._stop_flag = True
@@ -343,6 +364,11 @@ class AudioCaptureThread(QThread):
                     frame_bytes = read_buffer[:chunk_bytes]
                     read_buffer = read_buffer[chunk_bytes:]
 
+                    arr = np.frombuffer(frame_bytes, dtype=SAMPLE_DTYPE).reshape(self.blocksize, self.channels)
+                    if self._gains_active:
+                        arr = np.clip(arr * self._channel_gains, -1.0, 1.0).astype(SAMPLE_DTYPE)
+                        frame_bytes = arr.tobytes()
+
                     now = time.perf_counter()
                     if now < next_send_time:
                         time.sleep(next_send_time - now)
@@ -368,7 +394,6 @@ class AudioCaptureThread(QThread):
                     now = time.time()
                     if now - last_emit > 0.05:
                         last_emit = now
-                        arr = np.frombuffer(frame_bytes, dtype=SAMPLE_DTYPE).reshape(self.blocksize, self.channels)
                         peaks = np.abs(arr).max(axis=0).tolist()
                         self.levels_changed.emit(peaks)
                         self.stats_updated.emit(self._packets_sent, self._bytes_sent)

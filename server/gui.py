@@ -12,7 +12,7 @@ import sys
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QDateTime, QSettings
+from PySide6.QtCore import Qt, QDateTime, QSettings, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
@@ -21,7 +21,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from audio_engine import AUDIO_PORT, AudioCaptureThread, PipeWireSinkManager
+from audio_engine import (
+    AUDIO_PORT, AudioCaptureThread, PipeWireSinkManager,
+    MIN_CHANNEL_GAIN_DB, MAX_CHANNEL_GAIN_DB,
+)
 from discovery import DiscoveryBroadcaster
 
 
@@ -82,6 +85,18 @@ def _tray_icon_path_for_scheme(scheme) -> str:
     path = _find_asset_path(f"icon_tray_{variant}.png")
     return path or _find_icon_path()
 
+
+def _format_data_size(num_bytes) -> str:
+    """Formats a byte count as MB, switching to GB past 1000 MB -- kept in
+    sync by hand with client/gui.py's copy of this same function, the same
+    way the wire protocol constants are (see CLAUDE.md): no shared module
+    exists between the two independently-deployed apps."""
+    mb = num_bytes / (1024 * 1024)
+    if mb >= 1000:
+        return f"{mb / 1024:.2f} GB"
+    return f"{mb:.2f} MB"
+
+
 CHANNEL_LAYOUTS = OrderedDict([
     (2, "Stereo (2.0)"),
     (3, "2.1 Surround (3ch)"),
@@ -124,7 +139,9 @@ class VUMeter(QProgressBar):
 
 
 class VUMeterPanel(QWidget):
-    """A row of VUMeter widgets, rebuilt whenever the channel count changes."""
+    """A row of [VU meter + per-channel dB gain spinbox] columns, rebuilt
+    (and gain reset to 0 dB) whenever the channel count changes -- e.g. on
+    every layout change, since channel count/meaning changes with it."""
 
     CHANNEL_LABELS = {
         2: ["L", "R"],
@@ -134,11 +151,14 @@ class VUMeterPanel(QWidget):
         8: ["L", "R", "C", "LFE", "RL", "RR", "SL", "SR"],
     }
 
+    gain_changed = Signal(int, float)  # channel_index, db
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(4, 4, 4, 4)
         self._meters = []
+        self._gain_spins = []
         self.set_channels(2)
 
     def set_channels(self, channels: int):
@@ -147,11 +167,42 @@ class VUMeterPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._meters = []
+        self._gain_spins = []
         labels = self.CHANNEL_LABELS.get(channels, [str(i + 1) for i in range(channels)])
-        for label in labels:
+        for i, label in enumerate(labels):
+            # A plain QWidget (not a bare QVBoxLayout) so Qt's parent/child
+            # ownership cascades deleteLater() to the meter and spinbox
+            # automatically on the next set_channels() call, instead of
+            # needing to walk into each column by hand to clear it.
+            column = QWidget()
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+
             meter = VUMeter(label)
             self._meters.append(meter)
-            self._layout.addWidget(meter)
+            column_layout.addWidget(meter)
+
+            gain_spin = QSpinBox()
+            gain_spin.setRange(MIN_CHANNEL_GAIN_DB, MAX_CHANNEL_GAIN_DB)
+            gain_spin.setValue(0)
+            gain_spin.setSuffix(" dB")
+            gain_spin.setToolTip(f"Channel {label} volume trim (applied before sending)")
+            gain_spin.setMaximumWidth(70)
+            gain_spin.setAlignment(Qt.AlignCenter)
+            gain_spin.valueChanged.connect(
+                lambda db, idx=i: self.gain_changed.emit(idx, float(db))
+            )
+            self._gain_spins.append(gain_spin)
+            column_layout.addWidget(gain_spin, alignment=Qt.AlignHCenter)
+
+            self._layout.addWidget(column)
+
+    def gains_db(self) -> list:
+        return [spin.value() for spin in self._gain_spins]
+
+    def set_gains_db(self, gains):
+        for spin, db in zip(self._gain_spins, gains):
+            spin.setValue(int(db))
 
     def update_levels(self, levels):
         for meter, peak in zip(self._meters, levels):
@@ -200,6 +251,7 @@ class ServerMainWindow(QMainWindow):
         self.channel_combo.currentIndexChanged.connect(self._on_channel_layout_changed)
         self.channel_combo.currentIndexChanged.connect(self._save_settings)
         self.blocksize_spin.valueChanged.connect(self._save_settings)
+        self.vu_panel.gain_changed.connect(self._on_channel_gain_changed)
 
     def _build_ui(self):
         central = QWidget()
@@ -244,7 +296,7 @@ class ServerMainWindow(QMainWindow):
         meter_layout.addWidget(self.vu_panel)
         root.addWidget(meter_box, stretch=1)
 
-        self.stats_label = QLabel("Packets sent: 0    Data sent: 0.0 MB")
+        self.stats_label = QLabel("Latency: ~0.0 ms    Packets sent: 0    Data sent: 0.0 MB")
         self.stats_label.setStyleSheet("color: #888;")
         root.addWidget(self.stats_label)
 
@@ -274,6 +326,25 @@ class ServerMainWindow(QMainWindow):
         self.broadcaster.update_stream_info(
             audio_port=AUDIO_PORT, channels=self.channel_combo.currentData()
         )
+
+    def _on_channel_gain_changed(self, channel_index: int, db: float):
+        if self.capture_thread is not None:
+            self.capture_thread.set_channel_gain_db(channel_index, db)
+        gains = self.vu_panel.gains_db()
+        self.settings.setValue(f"stream/channel_gains_{len(gains)}ch",
+                                ",".join(str(g) for g in gains))
+        self.settings.sync()
+
+    def _load_channel_gains(self, channels: int):
+        saved = self.settings.value(f"stream/channel_gains_{channels}ch", "", type=str)
+        if not saved:
+            return
+        try:
+            gains = [int(x) for x in saved.split(",")]
+        except ValueError:
+            return
+        if len(gains) == channels:
+            self.vu_panel.set_gains_db(gains)
 
     def _update_latency_estimate(self):
         frames = self.blocksize_spin.value()
@@ -401,6 +472,7 @@ class ServerMainWindow(QMainWindow):
         self.capture_thread.error_occurred.connect(self._on_capture_error)
         self.capture_thread.stats_updated.connect(self._on_stats_updated)
         self.capture_thread.start()
+        self._load_channel_gains(channels)
 
         self.broadcaster.update_stream_info(audio_port=AUDIO_PORT, channels=channels)
         self.broadcaster.set_streaming(True)
@@ -441,8 +513,11 @@ class ServerMainWindow(QMainWindow):
         self._stop_streaming()
 
     def _on_stats_updated(self, packets_sent: int, bytes_sent: int):
-        mb = bytes_sent / (1024 * 1024)
-        self.stats_label.setText(f"Packets sent: {packets_sent}    Data sent: {mb:.2f} MB")
+        latency_ms = self.blocksize_spin.value() / 48000.0 * 1000.0
+        self.stats_label.setText(
+            f"Latency: ~{latency_ms:.1f} ms    Packets sent: {packets_sent}    "
+            f"Data sent: {_format_data_size(bytes_sent)}"
+        )
 
     def closeEvent(self, event):
         if not self._quitting:

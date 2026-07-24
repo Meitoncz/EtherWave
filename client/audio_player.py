@@ -15,6 +15,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 
 import numpy as np
 import sounddevice as sd
@@ -32,8 +33,8 @@ DEFAULT_JITTER_MS = 20
 MIN_JITTER_MS = 5
 MAX_JITTER_MS = 50
 
-MIN_CHANNEL_GAIN_DB = -10
-MAX_CHANNEL_GAIN_DB = 10
+MIN_CHANNEL_GAIN_DB = -24
+MAX_CHANNEL_GAIN_DB = 24
 
 
 def _downmix_matrix(rows):
@@ -139,6 +140,13 @@ class JitterBuffer:
         self.underruns = 0
         self.resyncs = 0
         self.packets_received = 0
+        # Sustained-drift guard, see pull(): a trailing ~2s window of
+        # (duration, was_outside_healthy_band) entries, plus running sums
+        # so the bad-fraction check is O(1) per pull instead of re-summing
+        # the window every call.
+        self._drift_window = deque()
+        self._drift_window_total = 0.0
+        self._drift_window_bad = 0.0
 
     def set_jitter_ms(self, ms: float):
         with self._lock:
@@ -221,6 +229,8 @@ class JitterBuffer:
                     return out
 
             available = self._max_written - self.read_frame
+            old_read_frame = self.read_frame
+            did_resync = False
 
             # Clock-drift guard: the server's capture clock and this
             # device's playback clock are independent oscillators and will
@@ -246,6 +256,66 @@ class JitterBuffer:
                 self.resyncs += 1
                 self.read_frame = max(0, self._max_written - self.jitter_frames)
                 available = self._max_written - self.read_frame
+                did_resync = True
+
+            # Sustained-drift guard: catches a persistent small
+            # misalignment -- e.g. from a brief real network hiccup that
+            # nudges read_frame out of step with the write frontier -- at
+            # a magnitude the coarse capacity_frames guard above
+            # deliberately ignores (that one's threshold is ~2 seconds on
+            # purpose; see its comment). Left alone, a small misalignment
+            # like this doesn't correct itself except by incidental
+            # server/client clock drift, on a completely unpredictable
+            # timescale (seconds to minutes) -- that's the "recovers on
+            # its own after a while" behavior this was chasing.
+            #
+            # This tracks the *fraction* of time spent outside the healthy
+            # band over a trailing window, not "how long has it been
+            # continuously bad" -- a first version used the latter (reset
+            # to zero on any single healthy-looking pull) and measured
+            # live cases slipped straight past it: a connection stuck
+            # oscillating through a repeating pattern like
+            # [0, -240, 240] never accumulates continuous bad time
+            # because every third pull looks fine on its own, even though
+            # 2 of every 3 pulls are underruns. An ordinary brief blip is a
+            # tiny fraction of the window and never approaches the
+            # trigger; a connection stuck cycling through a bad pattern
+            # like that one is ~67% bad and trips it almost immediately
+            # once the window fills. The window is intentionally short
+            # (0.5s, not several seconds) to catch and correct a stuck
+            # pattern quickly -- the crossfade below is what keeps that
+            # correction itself from being an audible click, so there's
+            # much less cost to reacting fast.
+            healthy_high = self.jitter_frames * 2
+            is_bad = not (0 < available <= healthy_high)
+            duration = frame_count / self.samplerate
+            self._drift_window.append((duration, is_bad))
+            self._drift_window_total += duration
+            if is_bad:
+                self._drift_window_bad += duration
+            while self._drift_window_total > 0.5:
+                old_duration, old_bad = self._drift_window.popleft()
+                self._drift_window_total -= old_duration
+                if old_bad:
+                    self._drift_window_bad -= old_duration
+            # The eviction loop above keeps _drift_window_total resting at
+            # or just under 0.5 by construction once the window has filled
+            # -- floating-point accumulation of many small additions never
+            # lands on exactly 0.5, so gating on ">= 0.5" here would almost
+            # never pass (measured live with the previous 2.0s version:
+            # stuck at 1.99999999999998 after far more than 2s of
+            # continuous data -- same issue, smaller number). 0.45 has
+            # enough margin below that resting point to trigger reliably
+            # without waiting for a coincidental exact match.
+            if (self._drift_window_total >= 0.45
+                    and self._drift_window_bad / self._drift_window_total > 0.10):
+                self.resyncs += 1
+                self.read_frame = max(0, self._max_written - self.jitter_frames)
+                available = self._max_written - self.read_frame
+                did_resync = True
+                self._drift_window.clear()
+                self._drift_window_total = 0.0
+                self._drift_window_bad = 0.0
 
             if available <= 0:
                 self.underruns += 1
@@ -254,9 +324,49 @@ class JitterBuffer:
 
             n = min(frame_count, available)
             idx = self.read_frame % self.capacity_frames
-            out[:n] = self._read_ring(idx, n)
+
+            if did_resync and old_read_frame != self.read_frame:
+                # A resync jumps read_frame to a different ring position
+                # instantly -- read cleanly picks up in-sequence audio
+                # again, but the jump itself is a hard discontinuity in the
+                # waveform (whatever sample value was playing right before
+                # it very likely doesn't match whatever comes right after),
+                # which is exactly what's audible as a click. Crossfading
+                # this one callback's worth of audio between where we
+                # *would* have kept reading (old_read_frame) and where we
+                # jumped to smooths that discontinuity into a brief blend
+                # instead of a hard edge -- the old side may itself be
+                # stale/glitchy (that's *why* we're resyncing), but a fade
+                # between two imperfect signals reads as far less jarring
+                # than an instant switch between them.
+                old_idx = old_read_frame % self.capacity_frames
+                old_audio = self._read_ring(old_idx, n)
+                new_audio = self._read_ring(idx, n)
+                fade_in = np.linspace(0.0, 1.0, n, dtype=np.float32).reshape(-1, 1)
+                out[:n] = old_audio * (1.0 - fade_in) + new_audio * fade_in
+            else:
+                out[:n] = self._read_ring(idx, n)
+
             self.read_frame += frame_count
             return out
+
+    def get_buffered_ms(self) -> float:
+        """Currently buffered audio depth, in milliseconds.
+
+        This is the latency this buffering strategy actually adds --
+        deliberately not a cross-machine "packet age" measurement (comparing
+        this device's clock to a timestamp from the server's clock), which
+        would require the two machines' clocks to be synchronized (NTP) to
+        mean anything. They aren't assumed to be, and on a LAN the real
+        network transit time is sub-millisecond anyway (see CLAUDE.md);
+        what actually matters for perceived latency is how much audio is
+        sitting in this ring buffer before playback.
+        """
+        with self._lock:
+            if not self.started:
+                return 0.0
+            available = self._max_written - self.read_frame
+            return max(0.0, available / self.samplerate * 1000.0)
 
     def reset(self):
         with self._lock:
@@ -266,13 +376,16 @@ class JitterBuffer:
             self._max_written = 0
             self.started = False
             self.resyncs = 0
+            self._drift_window.clear()
+            self._drift_window_total = 0.0
+            self._drift_window_bad = 0.0
             self.ring.fill(0.0)
 
 
 class NetworkReceiveThread(QThread):
     """Receives UDP audio packets from one server and feeds a JitterBuffer."""
 
-    stats_updated = Signal(float, int)  # latency_ms, packets_received
+    stats_updated = Signal(float, int, object)  # buffered_ms, packets_received, bytes_received
     error_occurred = Signal(str)
 
     def __init__(self, server_ip: str, jitter_buffer: JitterBuffer,
@@ -282,6 +395,7 @@ class NetworkReceiveThread(QThread):
         self.jitter_buffer = jitter_buffer
         self.audio_port = audio_port
         self._stop_flag = False
+        self._bytes_received = 0
 
     def stop(self):
         self._stop_flag = True
@@ -355,14 +469,18 @@ class NetworkReceiveThread(QThread):
                         )
                     continue
 
+                self._bytes_received += len(data)
+
                 frames = np.frombuffer(payload, dtype=np.float32).reshape(frame_count, channels)
                 self.jitter_buffer.push(seq, frame_count, frames)
 
                 now = time.time()
                 if now - last_emit > 0.1:
                     last_emit = now
-                    latency_ms = max(0.0, (now - ts) * 1000.0)
-                    self.stats_updated.emit(latency_ms, self.jitter_buffer.packets_received)
+                    self.stats_updated.emit(
+                        self.jitter_buffer.get_buffered_ms(), self.jitter_buffer.packets_received,
+                        self._bytes_received
+                    )
         finally:
             sock.close()
 
