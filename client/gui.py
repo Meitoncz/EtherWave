@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import sounddevice as sd
-from PySide6.QtCore import Qt, QDateTime, QSettings, Signal
+from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
@@ -460,6 +460,13 @@ class ClientMainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_about(self):
+        # Deferred via singleShot(0, ...) -- see server/gui.py's
+        # _show_about for why: opening a modal QMessageBox synchronously
+        # from a tray-menu QAction slot segfaults on KDE/Wayland because the
+        # tray menu is still tearing itself down.
+        QTimer.singleShot(0, self._do_show_about)
+
+    def _do_show_about(self):
         QMessageBox.about(
             self,
             "About EtherWave Client",

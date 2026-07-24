@@ -12,7 +12,7 @@ import sys
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QDateTime, QSettings
+from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
@@ -337,6 +337,16 @@ class ServerMainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_about(self):
+        # Deferred via singleShot(0, ...) rather than opened synchronously
+        # in this slot: on KDE/Wayland, opening a modal QMessageBox directly
+        # from a QAction triggered by a QSystemTrayIcon context menu segfaults
+        # (SEGV_ACCERR inside QMessageBox::about) because the tray menu is
+        # still tearing itself down when the new modal dialog tries to grab
+        # -- letting that finish first, on the next event-loop iteration,
+        # avoids the reentrancy.
+        QTimer.singleShot(0, self._do_show_about)
+
+    def _do_show_about(self):
         QMessageBox.about(
             self,
             "About EtherWave Server",
