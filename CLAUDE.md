@@ -86,8 +86,40 @@ define `HEADER_FORMAT = "!4sIdBH"`, `MAGIC`, `AUDIO_PORT`, etc. Same for
 `server/discovery.py` / `client/discovery.py` (`DISCOVERY_PORT`,
 `SERVICE_ID`, the JSON beacon schema). If you change the packet header or
 beacon schema, update both sides — there is no import between `server/` and
-`client/` to keep them in sync automatically. Full schema is documented in
-`README.md` under "Wire protocol".
+`client/` to keep them in sync automatically.
+
+**Audio packets** (UDP, port `51235`, broadcast from server), header packed
+with `struct.pack("!4sIdBH", ...)` (19 bytes):
+
+| Field | Type | Bytes | Notes |
+|---|---|---|---|
+| magic | `4s` | 4 | `b"EWv1"` |
+| sequence_num | `I` | 4 | Big-endian uint32, wraps at 2^32 |
+| timestamp | `d` | 8 | `time.time()` at capture |
+| channels | `B` | 1 | 2, 3, 4, 6, or 8 |
+| frame_count | `H` | 2 | Frames in this packet |
+| payload | float32[] | frame_count × channels × 4 | Interleaved PCM |
+
+**Discovery beacons** (UDP, port `51234`, broadcast from server every 2s,
+from launch until the app closes — not just while streaming), JSON body:
+
+```json
+{
+  "service": "EtherWave",
+  "version": 1,
+  "name": "hostname",
+  "audio_port": 51235,
+  "channels": 6,
+  "sample_rate": 48000,
+  "streaming": false,
+  "timestamp": 1234567890.12
+}
+```
+
+`streaming` is `false` while the server app is open but "Start Streaming"
+hasn't been clicked (or after "Stop Streaming"), and `true` while audio is
+actively flowing. `channels` reflects the currently-selected layout even
+while idle, updating live if changed before streaming starts.
 
 ### `JitterBuffer` (`client/audio_player.py`) is a ring buffer indexed by absolute frame position, not a packet queue
 

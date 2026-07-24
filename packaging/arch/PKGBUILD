@@ -14,7 +14,7 @@
 pkgname=etherwave-server
 pkgver=1.0.12
 pkgrel=1
-pkgdesc="EtherWave: ultra-low-latency multichannel audio streaming server (PipeWire virtual sink -> LAN)"
+pkgdesc="EtherWave: low-latency multichannel audio streaming server (PipeWire virtual sink -> LAN)"
 arch=('any')
 url="https://github.com/Meitoncz/EtherWave"
 license=('MIT')

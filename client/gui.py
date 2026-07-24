@@ -508,7 +508,7 @@ class ClientMainWindow(QMainWindow):
         box.setText(
             "<h3>EtherWave Client</h3>"
             f"<p>Version {APP_VERSION}</p>"
-            "<p>Ultra-low-latency multichannel audio streaming from a "
+            "<p>Low-latency multichannel audio streaming from a "
             "CachyOS/PipeWire server to this Mac.</p>"
             "<p>License: MIT</p>"
             '<p><a href="https://github.com/Meitoncz/EtherWave">'
