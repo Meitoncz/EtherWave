@@ -178,7 +178,6 @@ class ServerMainWindow(QMainWindow):
 
         self.sink_manager = PipeWireSinkManager()
         self.capture_thread = None
-        self._about_box = None
 
         self._build_ui()
         self._load_settings()
@@ -338,35 +337,33 @@ class ServerMainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_about(self):
-        # A first attempt deferred this via QTimer.singleShot(0, ...), on
-        # the theory the tray menu was still tearing down when the dialog
-        # tried to grab -- that alone did NOT stop the crash (confirmed via
-        # coredumpctl: still SEGV_ACCERR, still inside QMessageBox's
-        # destructor, called right where QDialog::exec() returns and Qt
-        # releases/restores the modal grab). That points at exec()'s modal
-        # grab itself misbehaving with this KDE/Wayland compositor, not at
-        # timing -- so this avoids exec()/QMessageBox.about() entirely and
-        # uses a plain non-modal .show() instead. Kept as a persistent
-        # instance attribute (not a local temporary) so repeated "About"
-        # clicks reuse and re-raise the same window instead of piling up.
-        if self._about_box is None:
-            box = QMessageBox(self)
-            box.setWindowTitle("About EtherWave Server")
-            box.setText(
-                "<h3>EtherWave Server</h3>"
-                f"<p>Version {APP_VERSION}</p>"
-                "<p>Ultra-low-latency multichannel audio streaming from a "
-                "CachyOS/PipeWire server to a LAN client.</p>"
-                "<p>License: MIT</p>"
-                '<p><a href="https://github.com/Meitoncz/EtherWave">'
-                "github.com/Meitoncz/EtherWave</a></p>"
-            )
-            box.setStandardButtons(QMessageBox.StandardButton.Ok)
-            box.setWindowModality(Qt.WindowModality.NonModal)
-            self._about_box = box
-        self._about_box.show()
-        self._about_box.raise_()
-        self._about_box.activateWindow()
+        # History: QMessageBox.about()'s modal exec() segfaulted on this
+        # KDE/Wayland compositor (SEGV_ACCERR in the destructor, right where
+        # exec() releases its modal grab). Switching to a non-modal .show()
+        # fixed the crash but re-showing the SAME previously-closed instance
+        # on a second click silently failed to reappear -- KWin apparently
+        # doesn't reliably remap a toplevel that was already hidden once.
+        # Building a fresh QMessageBox every time sidesteps that: each
+        # "About" click gets a brand-new toplevel, and WA_DeleteOnClose lets
+        # Qt clean it up itself once the user closes it, instead of us
+        # having to track and reuse an instance.
+        box = QMessageBox(self)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.setWindowTitle("About EtherWave Server")
+        box.setText(
+            "<h3>EtherWave Server</h3>"
+            f"<p>Version {APP_VERSION}</p>"
+            "<p>Ultra-low-latency multichannel audio streaming from a "
+            "CachyOS/PipeWire server to a LAN client.</p>"
+            "<p>License: MIT</p>"
+            '<p><a href="https://github.com/Meitoncz/EtherWave">'
+            "github.com/Meitoncz/EtherWave</a></p>"
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.show()
+        box.raise_()
+        box.activateWindow()
 
     def _quit_from_tray(self):
         self._quitting = True
