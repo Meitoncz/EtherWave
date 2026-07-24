@@ -12,7 +12,7 @@ import sys
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer
+from PySide6.QtCore import Qt, QDateTime, QSettings
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
@@ -178,6 +178,7 @@ class ServerMainWindow(QMainWindow):
 
         self.sink_manager = PipeWireSinkManager()
         self.capture_thread = None
+        self._about_box = None
 
         self._build_ui()
         self._load_settings()
@@ -337,27 +338,35 @@ class ServerMainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_about(self):
-        # Deferred via singleShot(0, ...) rather than opened synchronously
-        # in this slot: on KDE/Wayland, opening a modal QMessageBox directly
-        # from a QAction triggered by a QSystemTrayIcon context menu segfaults
-        # (SEGV_ACCERR inside QMessageBox::about) because the tray menu is
-        # still tearing itself down when the new modal dialog tries to grab
-        # -- letting that finish first, on the next event-loop iteration,
-        # avoids the reentrancy.
-        QTimer.singleShot(0, self._do_show_about)
-
-    def _do_show_about(self):
-        QMessageBox.about(
-            self,
-            "About EtherWave Server",
-            "<h3>EtherWave Server</h3>"
-            f"<p>Version {APP_VERSION}</p>"
-            "<p>Ultra-low-latency multichannel audio streaming from a "
-            "CachyOS/PipeWire server to a LAN client.</p>"
-            "<p>License: MIT</p>"
-            '<p><a href="https://github.com/Meitoncz/EtherWave">'
-            "github.com/Meitoncz/EtherWave</a></p>",
-        )
+        # A first attempt deferred this via QTimer.singleShot(0, ...), on
+        # the theory the tray menu was still tearing down when the dialog
+        # tried to grab -- that alone did NOT stop the crash (confirmed via
+        # coredumpctl: still SEGV_ACCERR, still inside QMessageBox's
+        # destructor, called right where QDialog::exec() returns and Qt
+        # releases/restores the modal grab). That points at exec()'s modal
+        # grab itself misbehaving with this KDE/Wayland compositor, not at
+        # timing -- so this avoids exec()/QMessageBox.about() entirely and
+        # uses a plain non-modal .show() instead. Kept as a persistent
+        # instance attribute (not a local temporary) so repeated "About"
+        # clicks reuse and re-raise the same window instead of piling up.
+        if self._about_box is None:
+            box = QMessageBox(self)
+            box.setWindowTitle("About EtherWave Server")
+            box.setText(
+                "<h3>EtherWave Server</h3>"
+                f"<p>Version {APP_VERSION}</p>"
+                "<p>Ultra-low-latency multichannel audio streaming from a "
+                "CachyOS/PipeWire server to a LAN client.</p>"
+                "<p>License: MIT</p>"
+                '<p><a href="https://github.com/Meitoncz/EtherWave">'
+                "github.com/Meitoncz/EtherWave</a></p>"
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.setWindowModality(Qt.WindowModality.NonModal)
+            self._about_box = box
+        self._about_box.show()
+        self._about_box.raise_()
+        self._about_box.activateWindow()
 
     def _quit_from_tray(self):
         self._quitting = True

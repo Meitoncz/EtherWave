@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import sounddevice as sd
-from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer, Signal
+from PySide6.QtCore import Qt, QDateTime, QSettings, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
@@ -214,6 +214,7 @@ class ClientMainWindow(QMainWindow):
         self.receive_thread = None
         self.output_stream = None
         self._auto_connecting = False
+        self._about_box = None
 
         self._build_ui()
         self._refresh_output_devices()
@@ -460,24 +461,31 @@ class ClientMainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_about(self):
-        # Deferred via singleShot(0, ...) -- see server/gui.py's
-        # _show_about for why: opening a modal QMessageBox synchronously
-        # from a tray-menu QAction slot segfaults on KDE/Wayland because the
-        # tray menu is still tearing itself down.
-        QTimer.singleShot(0, self._do_show_about)
-
-    def _do_show_about(self):
-        QMessageBox.about(
-            self,
-            "About EtherWave Client",
-            "<h3>EtherWave Client</h3>"
-            f"<p>Version {APP_VERSION}</p>"
-            "<p>Ultra-low-latency multichannel audio streaming from a "
-            "CachyOS/PipeWire server to this Mac.</p>"
-            "<p>License: MIT</p>"
-            '<p><a href="https://github.com/Meitoncz/EtherWave">'
-            "github.com/Meitoncz/EtherWave</a></p>",
-        )
+        # Non-modal (.show(), not .exec()) and reused as a persistent
+        # instance attribute -- see server/gui.py's _show_about for why:
+        # QMessageBox.about()'s modal exec() segfaulted on the server's
+        # KDE/Wayland (SEGV_ACCERR inside the destructor, right where
+        # exec() releases its modal grab). Applying the same fix here for
+        # consistency, since both windows share the identical tray-menu
+        # About pattern.
+        if self._about_box is None:
+            box = QMessageBox(self)
+            box.setWindowTitle("About EtherWave Client")
+            box.setText(
+                "<h3>EtherWave Client</h3>"
+                f"<p>Version {APP_VERSION}</p>"
+                "<p>Ultra-low-latency multichannel audio streaming from a "
+                "CachyOS/PipeWire server to this Mac.</p>"
+                "<p>License: MIT</p>"
+                '<p><a href="https://github.com/Meitoncz/EtherWave">'
+                "github.com/Meitoncz/EtherWave</a></p>"
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.setWindowModality(Qt.WindowModality.NonModal)
+            self._about_box = box
+        self._about_box.show()
+        self._about_box.raise_()
+        self._about_box.activateWindow()
 
     def _quit_from_tray(self):
         self._quitting = True
