@@ -12,7 +12,7 @@
 # pushed git tag, so it's always accurate there regardless of what's
 # checked in here -- bump it manually only to keep local builds sensible.
 pkgname=etherwave-server
-pkgver=1.0.9
+pkgver=1.0.10
 pkgrel=1
 pkgdesc="EtherWave: ultra-low-latency multichannel audio streaming server (PipeWire virtual sink -> LAN)"
 arch=('any')
