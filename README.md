@@ -237,8 +237,6 @@ contributor.
 - 🐛 Fixed a file descriptor leak in the server's `parec` launch retry
   path that could accumulate across many Stop/Start Streaming cycles in
   a single run of the app.
-- 🧹 Removed a leftover PipeWire loopback sink from an older, unrelated
-  tool that was still auto-loading into the audio graph.
 
 ### v1.0.1
 
