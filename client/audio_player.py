@@ -41,6 +41,13 @@ MAX_JITTER_MS = 50
 ADAPTIVE_STEP_MS = 5
 ADAPTIVE_DECAY_INTERVAL_S = 15.0
 
+# How long since the last push() before a new one is treated as resuming
+# after a genuine gap (server stopped sending, not just ordinary network
+# jitter) -- used both to reset cleanly in push() and to stop the coarse
+# resync guard in pull() from firing on a frozen write frontier. See the
+# comments at each use for why a time-based signal is the reliable one.
+STALLED_STREAM_S = 0.2
+
 MIN_CHANNEL_GAIN_DB = -24
 MAX_CHANNEL_GAIN_DB = 24
 
@@ -149,6 +156,12 @@ class JitterBuffer:
         self.underruns = 0
         self.resyncs = 0
         self.packets_received = 0
+        # Real-world clock timestamp of the last push() call -- lets both
+        # push() and pull() tell "the write frontier is temporarily behind
+        # due to clock drift, still an active stream" apart from "no new
+        # packets have arrived in a while, e.g. the server stopped
+        # streaming" (see STALLED_STREAM_S and its uses in each method).
+        self._last_push_time = 0.0
         # Sustained-drift guard, see pull(): a trailing ~2s window of
         # (duration, was_outside_healthy_band) entries, plus running sums
         # so the bad-fraction check is O(1) per pull instead of re-summing
@@ -189,6 +202,9 @@ class JitterBuffer:
 
     def push(self, seq: int, frame_count: int, frames: np.ndarray):
         with self._lock:
+            now = time.monotonic()
+            resumed_after_gap = (now - self._last_push_time) > STALLED_STREAM_S
+            self._last_push_time = now
             if self.frames_per_packet is None:
                 self.frames_per_packet = frame_count
             if self.base_seq is None:
@@ -209,12 +225,32 @@ class JitterBuffer:
             # silence, then garbled/discontinuous audio once the new
             # stream's own counter happens to grow past the old one.
             #
-            # The real signal is a packet landing more than a full ring
-            # behind our already-known progress (_max_written), not just
-            # behind zero -- that's not ordinary reordering (at most a few
-            # packets late), it means the sequence numbering itself reset.
-            # Start clean instead of trying to reconcile old and new.
-            if abs_frame < self._max_written - self.capacity_frames:
+            # Originally this compared abs_frame against _max_written minus
+            # a full ring -- "a packet landing more than a full ring behind
+            # our progress means the sequence numbering itself reset, not
+            # just reordering". That's *unreliable* across quick repeated
+            # restarts though (verified with a direct reproduction, not
+            # just reasoning about it): each successful reset also moves
+            # base_seq up to the new stream's own low seq, and if that
+            # stream's run is short (rapid Stop/Start cycling), it never
+            # builds up enough _max_written for the *next* restart's
+            # abs_frame to fall a full ring behind it. Worse, if two
+            # restarts both happen to start their seq at 0 (the normal
+            # case) while the first only got a few packets in, comparing
+            # seq/abs_frame magnitude alone genuinely cannot tell the two
+            # streams apart -- there is no threshold that fixes this,
+            # confirmed by reproducing it directly.
+            #
+            # The reliable signal is instead *time*: resumed_after_gap
+            # (computed above, before updating _last_push_time) means no
+            # packet arrived for STALLED_STREAM_S -- long enough that
+            # ordinary network jitter never triggers it, but a genuine
+            # Stop-then-Start cycle always does. Once we know a gap
+            # happened, there's no need to guess *why* from the numbers:
+            # starting clean is correct whether it's a brand new stream or
+            # the same one resuming, and costs nothing an ordinary resync
+            # doesn't already cost.
+            if resumed_after_gap or abs_frame < self._max_written - self.capacity_frames:
                 self.base_seq = seq
                 self.read_frame = 0
                 self._max_written = 0
@@ -270,7 +306,21 @@ class JitterBuffer:
             # an audible click) on normal network hiccups instead of only on
             # genuine sustained clock drift, sounding like stuttering rather
             # than fixing it.
-            if available > self.capacity_frames or available < -self.capacity_frames:
+            # available racing very negative has two structurally different
+            # causes that look identical from the numbers alone: genuine
+            # clock drift during active streaming (the write frontier is
+            # still advancing, just slower than we're consuming -- resync
+            # is correct) vs. the server having stopped sending entirely
+            # (_max_written is frozen; there's nothing to resync *to*).
+            # Resyncing in the second case sets read_frame to the same
+            # frozen position every time, and since nothing ever writes
+            # past it again, each subsequent pull() drains forward through
+            # those same already-buffered frames and re-triggers this exact
+            # guard once it laps -- replaying the last ~jitter_ms of real
+            # audio in an endless loop instead of silence. Only resync here
+            # if a packet has actually arrived recently.
+            stalled = (time.monotonic() - self._last_push_time) > STALLED_STREAM_S
+            if not stalled and (available > self.capacity_frames or available < -self.capacity_frames):
                 self.resyncs += 1
                 self.read_frame = max(0, self._max_written - self.jitter_frames)
                 available = self._max_written - self.read_frame
@@ -325,7 +375,7 @@ class JitterBuffer:
             # continuous data -- same issue, smaller number). 0.45 has
             # enough margin below that resting point to trigger reliably
             # without waiting for a coincidental exact match.
-            if (self._drift_window_total >= 0.45
+            if (not stalled and self._drift_window_total >= 0.45
                     and self._drift_window_bad / self._drift_window_total > 0.10):
                 self.resyncs += 1
                 self.read_frame = max(0, self._max_written - self.jitter_frames)
@@ -419,6 +469,7 @@ class JitterBuffer:
             self._drift_window_total = 0.0
             self._drift_window_bad = 0.0
             self._clean_seconds = 0.0
+            self._last_push_time = 0.0
             self.ring.fill(0.0)
 
 

@@ -217,6 +217,29 @@ contributor.
 
 ## 📝 Changelog
 
+### v1.0.2
+
+- 🐛 Fixed the server's packet pacing occasionally falling behind by
+  tens of milliseconds under heavy concurrent CPU load (e.g. a demanding
+  game running alongside the streamed audio) — the capture thread now
+  requests real-time (`SCHED_RR`) scheduling instead of relying on a
+  process-priority hint alone, which measured as the difference between
+  frequent multi-ms send bursts and a rock-steady 5.00ms cadence.
+  Falls back silently if the OS denies it.
+- 🐛 Fixed the client repeating the last fraction of a second of audio in
+  a loop instead of going silent when the server stops streaming (e.g.
+  clicking "Stop Streaming", or a brief disconnect) — the jitter buffer's
+  resync guard now recognizes a genuinely stalled stream (no packets
+  arriving) instead of treating it the same as ordinary clock drift
+  during active playback, and stream restarts are detected from a real
+  time gap rather than from packet sequence-number arithmetic that could
+  miss a restart if the previous stream's run was very short.
+- 🐛 Fixed a file descriptor leak in the server's `parec` launch retry
+  path that could accumulate across many Stop/Start Streaming cycles in
+  a single run of the app.
+- 🧹 Removed a leftover PipeWire loopback sink from an older, unrelated
+  tool that was still auto-loading into the audio graph.
+
 ### v1.0.1
 
 - 🐛 Fixed a server-side bug where latency could start around ~370ms and
