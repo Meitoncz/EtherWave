@@ -11,6 +11,7 @@ in server/audio_engine.py exactly, since there is no shared module between
 the two independently-deployed applications.
 """
 
+import errno
 import socket
 import struct
 import threading
@@ -24,6 +25,15 @@ from PySide6.QtCore import QThread, QObject, Signal
 # --- Network protocol constants (must match server/audio_engine.py) -------
 AUDIO_PORT = 51235
 MAGIC = b"EWv1"
+# Control channel the client uses to tell a server "send the audio to me".
+# Must match server/audio_engine.py. While at least one client is
+# subscribed the server unicasts to it instead of broadcasting the stream at
+# the entire LAN; if these renewals never arrive (an older server, or a
+# firewall in between) the server keeps broadcasting and everything works as
+# it always did.
+CONTROL_PORT = 51236
+SUBSCRIBE_MAGIC = b"EWS1"
+SUBSCRIBE_INTERVAL_S = 1.0
 # magic(4s) | sequence_num(I) | timestamp(d) | channels(B) | frame_count(H)
 HEADER_FORMAT = "!4sIdBH"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
@@ -47,6 +57,27 @@ ADAPTIVE_DECAY_INTERVAL_S = 15.0
 # resync guard in pull() from firing on a frozen write frontier. See the
 # comments at each use for why a time-based signal is the reliable one.
 STALLED_STREAM_S = 0.2
+
+# Continuous drift correction (see JitterBuffer.pull()). The capture and
+# playback clocks are independent crystals -- measured ~26 ppm apart on this
+# hardware -- so without correction the buffer slowly walks away from its
+# configured depth until it either underruns or adds latency.
+#
+# The control signal is an EMA of buffer depth with roughly a 100ms time
+# constant: fast enough to react to a genuine shortfall, slow enough that
+# the inherent one-block sawtooth and ordinary packet jitter don't provoke
+# corrections. Inside the dead band nothing is done at all, so the loop
+# parks within DRIFT_TOLERANCE_FRAMES of target rather than hunting.
+DRIFT_EMA_ALPHA = 0.05
+DRIFT_TOLERANCE_FRAMES = 48        # 1ms at 48kHz
+# Correction is proportional to the error: ordinary drift is nudged one
+# frame (~21us, inaudible) at a time, while a large sudden shortfall gets
+# the full rate below and is recovered in about two seconds rather than
+# fifteen. Two frames per 240-frame block is a 0.8% momentary rate change,
+# well under what registers as a pitch shift.
+DRIFT_MAX_FRAMES_PER_CALLBACK = 2
+DRIFT_FULL_AUTHORITY_FRAMES = 240  # error (5ms) at which the cap is reached
+
 
 MIN_CHANNEL_GAIN_DB = -24
 MAX_CHANNEL_GAIN_DB = 24
@@ -162,6 +193,11 @@ class JitterBuffer:
         # packets have arrived in a while, e.g. the server stopped
         # streaming" (see STALLED_STREAM_S and its uses in each method).
         self._last_push_time = 0.0
+        # Highest sequence number seen on the current stream, used together
+        # with the gap check in push() to tell a brief interruption apart
+        # from a genuine stream restart.
+        self._last_seq = None
+        self.stream_resets = 0
         # Sustained-drift guard, see pull(): a trailing ~2s window of
         # (duration, was_outside_healthy_band) entries, plus running sums
         # so the bad-fraction check is O(1) per pull instead of re-summing
@@ -169,6 +205,9 @@ class JitterBuffer:
         self._drift_window = deque()
         self._drift_window_total = 0.0
         self._drift_window_bad = 0.0
+        # Smoothed buffer depth driving the continuous drift correction in
+        # pull(); None until the first pull establishes a baseline.
+        self._avail_ema = None
         # Adaptive jitter sizing, opt-in via the GUI checkbox (see pull()):
         # off by default, so a fresh connection behaves exactly like before
         # unless the user asks for it.
@@ -241,22 +280,35 @@ class JitterBuffer:
             # streams apart -- there is no threshold that fixes this,
             # confirmed by reproducing it directly.
             #
-            # The reliable signal is instead *time*: resumed_after_gap
-            # (computed above, before updating _last_push_time) means no
-            # packet arrived for STALLED_STREAM_S -- long enough that
-            # ordinary network jitter never triggers it, but a genuine
-            # Stop-then-Start cycle always does. Once we know a gap
-            # happened, there's no need to guess *why* from the numbers:
-            # starting clean is correct whether it's a brand new stream or
-            # the same one resuming, and costs nothing an ordinary resync
-            # doesn't already cost.
-            if resumed_after_gap or abs_frame < self._max_written - self.capacity_frames:
+            # A gap alone is NOT enough to justify wiping the buffer. Measured
+            # live: a ~200ms interruption (a CPU or network hiccup, with the
+            # server still streaming throughout) tripped this reset, which
+            # zeroes the ring and restarts buffering from scratch -- heard as
+            # a burst of distortion, and far more damage than the hiccup
+            # itself would have caused. What actually distinguishes a real
+            # restart is the *sequence numbering going backwards*: a fresh
+            # AudioCaptureThread starts again from 0, while a stream that
+            # merely stalled resumes with its counter still advancing.
+            #
+            # Requiring both conditions keeps the rapid Stop/Start case
+            # working (that always involves a gap AND a backwards jump) while
+            # letting an ordinary interruption resolve the cheap way: the
+            # write frontier jumps forward, the drift guard below resyncs
+            # once, and playback continues without the ring being cleared.
+            # Reordering can't produce a false positive here, since it is
+            # sub-millisecond on a LAN and this also requires a 200ms gap.
+            seq_restarted = self._last_seq is not None and seq <= self._last_seq
+            if ((resumed_after_gap and seq_restarted)
+                    or abs_frame < self._max_written - self.capacity_frames):
                 self.base_seq = seq
                 self.read_frame = 0
                 self._max_written = 0
                 self.started = False
+                self._last_seq = None
+                self.stream_resets += 1
                 self.ring.fill(0.0)
                 abs_frame = 0
+                self._avail_ema = None
 
             if abs_frame < 0 or frame_count > self.capacity_frames:
                 return
@@ -264,6 +316,7 @@ class JitterBuffer:
             idx = abs_frame % self.capacity_frames
             self._write_ring(idx, frames)
             self._max_written = max(self._max_written, abs_frame + frame_count)
+            self._last_seq = seq if self._last_seq is None else max(self._last_seq, seq)
             self.packets_received += 1
 
     def pull(self, frame_count: int) -> np.ndarray:
@@ -324,6 +377,7 @@ class JitterBuffer:
                 self.resyncs += 1
                 self.read_frame = max(0, self._max_written - self.jitter_frames)
                 available = self._max_written - self.read_frame
+                self._avail_ema = float(available)
                 did_resync = True
 
             # Sustained-drift guard: catches a persistent small
@@ -354,6 +408,57 @@ class JitterBuffer:
             # pattern quickly -- the crossfade below is what keeps that
             # correction itself from being an audible click, so there's
             # much less cost to reacting fast.
+            # Continuous drift correction: hold the buffer at its configured
+            # depth instead of only reacting once things are already broken.
+            #
+            # The server's capture clock and this device's playback clock are
+            # independent crystals (measured on this pair: ~26 ppm apart), so
+            # read_frame steadily walks away from the target offset behind the
+            # write frontier. Nothing here used to pull it back: the guards
+            # below treat anything from a single frame up to jitter_frames*2
+            # as "healthy", so a buffer drained to one packet of headroom
+            # looked fine while underrunning roughly once a second, and only
+            # recovered when enough underruns accumulated to trip the
+            # sustained-drift guard -- then drifted straight back down. That
+            # cycle was measured directly: 20ms -> 5ms -> ~30s of continuous
+            # underruns -> resync -> repeat, about once a minute.
+            #
+            # Correcting by a single frame per callback is enough to cancel
+            # drift three orders of magnitude larger than what real hardware
+            # exhibits, while being inaudible: one frame at 48kHz is ~21us,
+            # far below the threshold where a dropped or repeated sample is
+            # perceptible, and it fires at most a few times per second.
+            # Deliberately gated on a short EMA of buffer depth rather than
+            # the instantaneous value: fast enough (~100ms) to react to a
+            # real shortfall, slow enough that the inherent one-block
+            # sawtooth and ordinary packet-arrival jitter don't provoke
+            # corrections -- only genuine, sustained offset does.
+            if self._avail_ema is None:
+                self._avail_ema = float(available)
+            else:
+                self._avail_ema += (available - self._avail_ema) * DRIFT_EMA_ALPHA
+            drift_error = self._avail_ema - self.jitter_frames
+
+            if abs(drift_error) > DRIFT_TOLERANCE_FRAMES:
+                # Proportional authority: ordinary clock drift is a fraction
+                # of a frame per second and gets nudged one frame at a time,
+                # while a sudden shortfall -- measured live as an abrupt
+                # ~17ms loss when the stream stalls upstream and resumes,
+                # permanently shifting the write frontier -- is pulled back
+                # within a couple of seconds. The guards below deliberately
+                # treat anything from a single frame up to twice the target
+                # as "healthy", so without this nothing would correct such a
+                # shortfall at all: it would sit one packet from underrunning
+                # until the next resync happened to fire.
+                step = min(DRIFT_MAX_FRAMES_PER_CALLBACK,
+                           max(1, round(abs(drift_error) / DRIFT_FULL_AUTHORITY_FRAMES)))
+                if drift_error > 0 and available > frame_count + step:
+                    self.read_frame += step       # consume extra: shrink
+                    available -= step
+                elif drift_error < 0 and self.read_frame >= step:
+                    self.read_frame -= step       # replay: grow
+                    available += step
+
             healthy_high = self.jitter_frames * 2
             is_bad = not (0 < available <= healthy_high)
             duration = frame_count / self.samplerate
@@ -380,6 +485,7 @@ class JitterBuffer:
                 self.resyncs += 1
                 self.read_frame = max(0, self._max_written - self.jitter_frames)
                 available = self._max_written - self.read_frame
+                self._avail_ema = float(available)
                 did_resync = True
                 self._drift_window.clear()
                 self._drift_window_total = 0.0
@@ -470,6 +576,8 @@ class JitterBuffer:
             self._drift_window_bad = 0.0
             self._clean_seconds = 0.0
             self._last_push_time = 0.0
+            self._last_seq = None
+            self._avail_ema = None
             self.ring.fill(0.0)
 
 
@@ -501,8 +609,16 @@ class NetworkReceiveThread(QThread):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, "SO_REUSEPORT"):
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            # Deliberately NOT SO_REUSEPORT. With it set, a second copy of
+            # this app binds the same port happily and the kernel then
+            # splits the incoming broadcast stream *between* the two
+            # instances instead of delivering it to both -- each one
+            # receives roughly half the packets and underruns constantly,
+            # with nothing anywhere reporting an error. That was observed
+            # live, and it is indistinguishable from severe network loss
+            # while you are looking at it. Without the option, a second
+            # instance fails to bind and says so, which is a far better
+            # outcome than silently degrading the first one.
             # Request a generous receive buffer: at 6-8ch float32 @ 48kHz
             # this stream runs at roughly 1-1.5 MB/s, and the OS default
             # (often just tens of KB, especially on macOS) can overflow
@@ -515,13 +631,36 @@ class NetworkReceiveThread(QThread):
             sock.bind(("", self.audio_port))
             sock.settimeout(0.5)
         except OSError as exc:
-            self.error_occurred.emit(f"Failed to bind audio socket: {exc}")
+            if getattr(exc, "errno", None) in (errno.EADDRINUSE, errno.EACCES):
+                self.error_occurred.emit(
+                    f"Audio port {self.audio_port} is already in use — another copy of "
+                    f"EtherWave Client is most likely already running. Close it and "
+                    f"reconnect; running two at once makes both of them stutter."
+                )
+            else:
+                self.error_occurred.emit(f"Failed to bind audio socket: {exc}")
             return
 
         last_emit = 0.0
         last_mismatch_warning = 0.0
+        last_subscribe = 0.0
         try:
             while not self._stop_flag:
+                # Renew the subscription regardless of whether audio is
+                # flowing: a server that is discovered but not yet streaming
+                # must already know about us, so that when the user does
+                # press Start Streaming it unicasts from the very first
+                # packet rather than broadcasting until we happen to speak
+                # up. Sent from the receive socket itself, so the server sees
+                # the address it should stream back to.
+                now_mono = time.monotonic()
+                if now_mono - last_subscribe > SUBSCRIBE_INTERVAL_S:
+                    last_subscribe = now_mono
+                    try:
+                        sock.sendto(SUBSCRIBE_MAGIC, (self.server_ip, CONTROL_PORT))
+                    except OSError:
+                        pass    # falls back to broadcast on the server side
+
                 try:
                     data, addr = sock.recvfrom(65535)
                 except socket.timeout:

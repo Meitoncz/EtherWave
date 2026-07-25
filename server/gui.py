@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from audio_engine import (
-    AUDIO_PORT, AudioCaptureThread, PipeWireSinkManager,
+    AUDIO_PORT, AudioCaptureThread, PipeWireSinkManager, SubscriberRegistry,
     MIN_CHANNEL_GAIN_DB, MAX_CHANNEL_GAIN_DB,
 )
 from discovery import DiscoveryBroadcaster
@@ -284,6 +284,15 @@ class ServerMainWindow(QMainWindow):
         self.broadcaster.status_changed.connect(self._log)
         self.broadcaster.error_occurred.connect(self._log)
         self.broadcaster.start()
+
+        # Listens for clients announcing themselves so the audio stream can
+        # be unicast straight to them. Started at launch, not on Start
+        # Streaming, so subscriptions are already known by the time
+        # streaming begins. Falls back to broadcast when nobody is
+        # subscribed -- see SubscriberRegistry.
+        self.subscribers = SubscriberRegistry()
+        self.subscribers.subscribers_changed.connect(self._on_subscribers_changed)
+        self.subscribers.start()
         self.channel_combo.currentIndexChanged.connect(self._on_channel_layout_changed)
         self.channel_combo.currentIndexChanged.connect(self._save_settings)
         self.blocksize_spin.valueChanged.connect(self._save_settings)
@@ -401,6 +410,18 @@ class ServerMainWindow(QMainWindow):
         ms = frames / 48000.0 * 1000.0
         self.latency_label.setText(f"~{ms:.1f} ms per packet")
 
+    def _on_subscribers_changed(self, count: int):
+        if count:
+            message = f"{count} client(s) subscribed — streaming directly to them"
+        else:
+            message = "No subscribed clients — falling back to LAN broadcast"
+        self._log(message)
+        # Also to stdout, so the current delivery mode is visible in
+        # `journalctl --user -u etherwave-server` without needing to read
+        # the GUI -- useful when the server runs headless or is being
+        # checked remotely.
+        print(message, flush=True)
+
     def _log(self, message: str):
         timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
         self.log_view.appendPlainText(f"[{timestamp}] {message}")
@@ -513,6 +534,7 @@ class ServerMainWindow(QMainWindow):
         self.vu_panel.set_channels(channels)
 
         self.capture_thread = AudioCaptureThread(
+            subscribers=self.subscribers,
             channels=channels,
             sink_name=self.sink_manager.SINK_NAME,
             blocksize=blocksize,
@@ -578,6 +600,8 @@ class ServerMainWindow(QMainWindow):
 
         self._stop_streaming()
         self.broadcaster.stop()
+        self.subscribers.stop()
+        self.subscribers.wait(2000)
         self.broadcaster.wait(2000)
         self.tray_icon.hide()
         super().closeEvent(event)

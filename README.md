@@ -39,8 +39,9 @@ you tried only ever gave you stereo.
   recommended over Wi-Fi for a stable stream. Discovery uses UDP broadcast,
   which doesn't cross routers/VLANs — server and client need to be on the
   same network segment.
-- UDP ports `51234` (discovery) and `51235` (audio) reachable between the
-  two machines — see ⚠️ **Firewalls** below if you have one active.
+- UDP ports `51234` (discovery), `51235` (audio) and `51236` (client
+  subscriptions) reachable between the two machines — see ⚠️ **Firewalls**
+  below if you have one active.
 
 ## 📥 Installing the server (CachyOS / Arch Linux)
 
@@ -174,12 +175,18 @@ streaming.
   systemctl --user stop app-com.github.wwmm.easyeffects@autostart.service
   ```
 - **Firewalls will silently eat the stream.** If you run `ufw` on the
-  server, open both ports first — a default-deny policy drops the
-  broadcast packets with no error message, which looks exactly like a bug:
+  server, open the ports first — a default-deny policy drops the packets
+  with no error message, which looks exactly like a bug:
   ```bash
   sudo ufw allow 51234/udp
   sudo ufw allow 51235/udp
+  sudo ufw allow 51236/udp
   ```
+  Port `51236` is the one clients use to say "stream to me", which is what
+  lets the server send the audio straight to them instead of broadcasting
+  it at the whole network. If it stays closed nothing breaks — the server
+  simply falls back to broadcasting, exactly as older versions always did —
+  so this is worth opening but not required.
   On macOS, make sure you accepted the local network permission prompt the
   first time the client ran.
 - **Wi-Fi works but Ethernet is much more reliable** for a smooth,
@@ -216,6 +223,38 @@ contributor.
   Arch package and attaches both to a GitHub Release.
 
 ## 📝 Changelog
+
+### v1.0.3
+
+- 📡 **The audio stream is now sent straight to the clients that ask for
+  it**, instead of being broadcast at every device on the LAN. A broadcast
+  stream has to be received and discarded by every machine on the network —
+  around 1.15 MB/s at 5.1/48kHz — which is wasteful everywhere and
+  genuinely disruptive over Wi-Fi. Clients now announce themselves on UDP
+  `51236`; if nothing does (an older client, or that port firewalled off)
+  the server keeps broadcasting exactly as before, so nothing can break.
+  Discovery is unchanged, so auto-connect works the same as it always did.
+- 🐛 **Fixed the jitter buffer slowly starving itself.** The capture and
+  playback clocks are independent crystals (~26 ppm apart on the hardware
+  this was measured on) and nothing held the buffer at its configured
+  depth, so it drifted down to a single packet of headroom and underran
+  roughly once a second for ~30 seconds at a time before a resync snapped
+  it back — then drifted straight back down, about once a minute. Buffer
+  depth is now held continuously, correcting by a single inaudible frame
+  at a time.
+- 🐛 **Fixed a brief interruption being treated as a full stream restart.**
+  A ~200 ms hiccup (network or CPU) made the client wipe its buffer and
+  rebuild from scratch, heard as a burst of distortion — far more damage
+  than the hiccup itself. A restart is now recognised properly, by the
+  packet numbering starting over, so an ordinary interruption just resolves
+  itself.
+- 🐛 **A sudden loss of buffer now recovers in ~2 seconds instead of ~15**,
+  during which playback previously sat one packet away from underrunning.
+- 🐛 **Running two copies of the client at once now fails with a clear
+  message** instead of silently splitting the incoming stream between them
+  and making both stutter.
+- ⚡ Discovery no longer wakes the UI once a second regardless of whether
+  anything changed.
 
 ### v1.0.2
 

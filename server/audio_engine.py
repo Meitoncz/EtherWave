@@ -24,6 +24,7 @@ the two independently-deployed applications.
 import os
 import select
 import socket
+import threading
 import struct
 import subprocess
 import time
@@ -34,6 +35,17 @@ from PySide6.QtCore import QThread, Signal
 # --- Network protocol constants (must match client/audio_player.py) -------
 AUDIO_PORT = 51235
 BROADCAST_ADDRESS = "255.255.255.255"
+# Clients announce themselves here so audio can be unicast straight to them
+# instead of broadcast at the whole LAN. See SubscriberRegistry.
+CONTROL_PORT = 51236
+SUBSCRIBE_MAGIC = b"EWS1"
+# How long a subscription stays valid without being renewed. Clients renew
+# roughly every second, so this tolerates a couple of lost renewals before
+# the server drops them and (if nobody else is listening) falls back to
+# broadcasting.
+SUBSCRIBER_TIMEOUT_S = 5.0
+# How often the send loop re-reads the subscriber list.
+DESTINATION_REFRESH_S = 0.5
 MAGIC = b"EWv1"
 # magic(4s) | sequence_num(I) | timestamp(d) | channels(B) | frame_count(H)
 HEADER_FORMAT = "!4sIdBH"
@@ -193,6 +205,76 @@ class PipeWireSinkManager:
             self._previous_default_sink = None
 
 
+class SubscriberRegistry(QThread):
+    """Tracks which clients currently want the audio stream.
+
+    The stream used to go to 255.255.255.255, which every device on the LAN
+    has to receive and discard -- roughly 1.15 MB/s of it at 6ch/48kHz. That
+    is wasteful everywhere and genuinely disruptive over Wi-Fi, where
+    broadcast is transmitted at the lowest basic rate.
+
+    Clients now send a tiny renewal datagram here while they are connected,
+    and the capture thread unicasts to whoever is currently subscribed. If
+    nobody is (an older client, or the renewals being dropped by a firewall
+    between the two machines), it falls back to broadcasting exactly as
+    before -- so this is a pure improvement rather than a new way to end up
+    with no audio.
+    """
+
+    subscribers_changed = Signal(int)
+
+    def __init__(self, control_port: int = CONTROL_PORT, parent=None):
+        super().__init__(parent)
+        self.control_port = control_port
+        self._lock = threading.Lock()
+        self._subscribers = {}
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
+
+    def current_destinations(self):
+        """IPs whose subscription hasn't expired. Empty means 'broadcast'."""
+        cutoff = time.monotonic() - SUBSCRIBER_TIMEOUT_S
+        with self._lock:
+            expired = [ip for ip, seen in self._subscribers.items() if seen < cutoff]
+            for ip in expired:
+                del self._subscribers[ip]
+            live = list(self._subscribers)
+        if expired:
+            self.subscribers_changed.emit(len(live))
+        return live
+
+    def run(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", self.control_port))
+            sock.settimeout(0.5)
+        except OSError:
+            # Not fatal: without a control channel we simply keep
+            # broadcasting, which is what every previous version did.
+            return
+        try:
+            while not self._stop_flag:
+                try:
+                    data, addr = sock.recvfrom(64)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    continue
+                if not data.startswith(SUBSCRIBE_MAGIC):
+                    continue
+                with self._lock:
+                    is_new = addr[0] not in self._subscribers
+                    self._subscribers[addr[0]] = time.monotonic()
+                    count = len(self._subscribers)
+                if is_new:
+                    self.subscribers_changed.emit(count)
+        finally:
+            sock.close()
+
+
 class AudioCaptureThread(QThread):
     """Captures the EtherWave_Sink monitor (via `parec`) and streams it over UDP."""
 
@@ -214,7 +296,8 @@ class AudioCaptureThread(QThread):
 
     def __init__(self, channels: int, sink_name: str, samplerate: int = 48000,
                  blocksize: int = 240, audio_port: int = AUDIO_PORT,
-                 broadcast_address: str = BROADCAST_ADDRESS, parent=None):
+                 broadcast_address: str = BROADCAST_ADDRESS,
+                 subscribers: "SubscriberRegistry" = None, parent=None):
         super().__init__(parent)
         self.channels = channels
         self.sink_name = sink_name
@@ -222,6 +305,7 @@ class AudioCaptureThread(QThread):
         self.blocksize = blocksize
         self.audio_port = audio_port
         self.broadcast_address = broadcast_address
+        self.subscribers = subscribers
         self._stop_flag = False
         self._packets_sent = 0
         self._bytes_sent = 0
@@ -387,6 +471,11 @@ class AudioCaptureThread(QThread):
         # sleep to the schedule, and if we've genuinely fallen behind we
         # catch up without trying to replay a backlog instantly.
         next_send_time = time.perf_counter()
+        # Refreshed periodically rather than per packet: the registry takes a
+        # lock, and at 200 packets/second that contention buys nothing when
+        # subscriptions only change on a human timescale.
+        destinations = ()
+        last_dest_refresh = 0.0
 
         try:
             while not self._stop_flag:
@@ -469,14 +558,34 @@ class AudioCaptureThread(QThread):
                     header = struct.pack(HEADER_FORMAT, MAGIC, seq & 0xFFFFFFFF,
                                           time.time(), self.channels, self.blocksize)
                     packet = header + frame_bytes
-                    try:
-                        sock.sendto(packet, (self.broadcast_address, self.audio_port))
-                    except OSError as exc:
-                        self.error_occurred.emit(f"UDP send failed: {exc}")
-                        return
+
+                    if now - last_dest_refresh > DESTINATION_REFRESH_S:
+                        last_dest_refresh = now
+                        destinations = tuple(self.subscribers.current_destinations()) \
+                            if self.subscribers is not None else ()
+
+                    if destinations:
+                        for ip in destinations:
+                            try:
+                                sock.sendto(packet, (ip, self.audio_port))
+                                self._bytes_sent += len(packet)
+                            except OSError:
+                                # A client that vanished can make the kernel
+                                # surface an earlier ICMP unreachable here.
+                                # That concerns exactly one subscriber and
+                                # resolves itself when its subscription
+                                # expires -- never a reason to tear down the
+                                # stream for everyone else.
+                                pass
+                    else:
+                        try:
+                            sock.sendto(packet, (self.broadcast_address, self.audio_port))
+                            self._bytes_sent += len(packet)
+                        except OSError as exc:
+                            self.error_occurred.emit(f"UDP send failed: {exc}")
+                            return
                     seq += 1
                     self._packets_sent += 1
-                    self._bytes_sent += len(packet)
 
                     now = time.time()
                     if now - last_emit > 0.05:

@@ -18,6 +18,16 @@ DISCOVERY_PORT = 51234
 SERVICE_ID = "EtherWave"
 SERVER_TIMEOUT_SECONDS = 6.0
 
+# Fields whose value actually matters to a listener. Everything else in a
+# beacon (its timestamp, and the last_seen we stamp on arrival) changes on
+# every single broadcast, so comparing whole beacons would report a change
+# twice a second forever and defeat the point of comparing at all.
+SIGNIFICANT_FIELDS = ("name", "audio_port", "channels", "sample_rate", "streaming")
+
+
+def _significant(info):
+    return tuple(info.get(field) for field in SIGNIFICANT_FIELDS)
+
 
 class DiscoveryListener(QThread):
     """Emits the current dict of {ip: server_info} whenever it changes or a
@@ -49,6 +59,7 @@ class DiscoveryListener(QThread):
         servers = {}
         try:
             while not self._stop_flag:
+                changed = False
                 try:
                     data, addr = sock.recvfrom(4096)
                 except socket.timeout:
@@ -61,16 +72,27 @@ class DiscoveryListener(QThread):
                     if info and info.get("service") == SERVICE_ID:
                         info["ip"] = addr[0]
                         info["last_seen"] = time.time()
+                        previous = servers.get(addr[0])
+                        if previous is None or _significant(previous) != _significant(info):
+                            changed = True
                         servers[addr[0]] = info
 
                 now = time.time()
                 stale_ips = [ip for ip, info in servers.items()
                              if now - info["last_seen"] > self.timeout]
-                changed = bool(stale_ips)
+                if stale_ips:
+                    changed = True
                 for ip in stale_ips:
                     del servers[ip]
 
-                if changed or not self._stop_flag:
+                # Emit only when the picture actually changed. The condition
+                # here used to be `changed or not self._stop_flag`, and the
+                # second half is unconditionally true inside this loop, so it
+                # emitted on every iteration -- at least once a second, and
+                # again on every beacon -- making the `changed` bookkeeping
+                # dead code. Harmless only because the GUI happened to
+                # re-check for itself before touching any widgets.
+                if changed:
                     self.servers_updated.emit(dict(servers))
         finally:
             sock.close()
