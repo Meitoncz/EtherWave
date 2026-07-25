@@ -215,6 +215,36 @@ contributor.
   `.github/workflows/release.yml`, which builds the macOS `.app` and the
   Arch package and attaches both to a GitHub Release.
 
+## 📝 Changelog
+
+### v1.0.1
+
+- 🐛 Fixed a server-side bug where latency could start around ~370ms and
+  keep climbing the longer a stream ran (up to ~900ms after about 80
+  minutes) — a stale backlog in how the server drained audio from
+  PipeWire, not the client's jitter buffer.
+- 🐛 Fixed macOS output latency being much higher than it should on
+  aggregated/virtual audio devices (e.g. Rogue Amoeba's Loopback) — the
+  client now explicitly requests a small output buffer instead of trusting
+  the device's own (sometimes conservative) default.
+- 📊 Added a real output-latency reading to the client's live stats,
+  alongside the existing buffered-latency figure, for a full picture of
+  where the delay actually is.
+- 🎨 Cleaner, fixed-width stats layout on both apps.
+
+### v1.0.0 — Initial public release
+
+- 🎉 First public release.
+- 🔊 Multichannel streaming (2.0 up to 7.1), uncompressed, with zero-config
+  LAN auto-discovery.
+- 🎚️ Adjustable jitter buffer with optional adaptive sizing.
+- 🎛️ Per-channel volume trim on both server and client.
+- 🗂️ System tray/menu bar apps with theme-aware icons, autostart at login,
+  and an About dialog.
+- 🐛 Fixed a chronic jitter-buffer desync bug that could cause occasional
+  tinny/distorted or choppy audio with no self-correction.
+- 📦 Automated macOS `.app` and Arch package builds via GitHub releases.
+
 ## 💬 Disclaimer
 
 I built EtherWave primarily for myself: I'd spent years searching online
@@ -222,11 +252,13 @@ for something like it, and every similar tool I found only supported
 stereo — nothing did real multichannel (5.1/7.1) LAN streaming the way I
 wanted.
 
-EtherWave was built with the help of AI. That said, I'm a technically
-grounded person with years of professional experience in the IT industry,
-including years of hands-on frontend development among other areas —
-every part of this project has been directed, reviewed, and tested with
-that background, not just prompted and shipped blind. It went through
-hours of real troubleshooting and debugging (live packet captures,
-PipeWire routing traces, before/after timing measurements, and more) to
-get the streaming pipeline actually solid, not just superficially working.
+EtherWave was built with the help of AI, but I'm a technically grounded
+person with years of professional experience in the IT industry, including
+hands-on frontend development among other areas — every part of this
+project has been directed, reviewed, and tested with that background, not
+just prompted and shipped blind. Getting it from "technically working" to
+actually solid took real, hands-on troubleshooting — live packet captures,
+PipeWire routing traces, before/after latency measurements, and more than
+one round of chasing audio bugs that only ever showed up under real
+playback conditions, not by inspecting the code. See the Changelog above
+for the specifics; this wasn't a one-shot generate-and-forget project.
