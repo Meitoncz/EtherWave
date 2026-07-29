@@ -224,6 +224,14 @@ contributor.
 
 ## 📝 Changelog
 
+### v1.0.5
+
+- 🐛 **Fixed the macOS Dock icon staying visible while the client window
+  was minimized to the tray**, looking like a normal running app with
+  nothing to actually bring forward. The Dock icon now only shows while
+  the window is open, matching the menu bar tray icon being the only
+  thing that does anything while it's hidden.
+
 ### v1.0.4
 
 - 🐛 **Fixed the dock/taskbar icon opening a second copy of the app**
