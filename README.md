@@ -224,6 +224,12 @@ contributor.
 
 ## 📝 Changelog
 
+### v1.0.4
+
+- 🐛 **Fixed the dock/taskbar icon opening a second copy of the app**
+  instead of bringing the existing (hidden-to-tray) window back. Both apps
+  now guard against a second instance and just raise the running one.
+
 ### v1.0.3
 
 - 📡 **The audio stream is now sent straight to the clients that ask for
