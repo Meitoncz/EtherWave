@@ -21,12 +21,13 @@ ASSETS_DIR = PROJECT_ROOT / "assets"
 # (which reads the same bundled file at runtime) never drift out of sync.
 APP_VERSION = (ASSETS_DIR / "VERSION").read_text().strip()
 
-# EtherWave only imports QtCore/QtGui/QtWidgets (see client/gui.py etc.).
-# requirements.txt installs PySide6-Essentials rather than the full PySide6
-# meta-package for the same reason, but PyInstaller's PySide6 hook can still
-# go looking for these unused modules/plugins on disk and bundle them if
-# present -- exclude them explicitly so a build machine that happens to
-# have the full PySide6 installed doesn't balloon the app size regardless.
+# EtherWave imports QtCore/QtGui/QtWidgets/QtNetwork (see client/gui.py,
+# client/main.py's single-instance guard). requirements.txt installs
+# PySide6-Essentials rather than the full PySide6 meta-package for the same
+# reason, but PyInstaller's PySide6 hook can still go looking for these
+# unused modules/plugins on disk and bundle them if present -- exclude them
+# explicitly so a build machine that happens to have the full PySide6
+# installed doesn't balloon the app size regardless.
 UNUSED_QT_MODULES = [
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
     "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuick3D", "PySide6.QtQuickWidgets",
@@ -34,7 +35,7 @@ UNUSED_QT_MODULES = [
     "PySide6.Qt3DAnimation", "PySide6.Qt3DExtras",
     "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtGraphs",
     "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
-    "PySide6.QtNetwork", "PySide6.QtNfc", "PySide6.QtBluetooth", "PySide6.QtSerialPort",
+    "PySide6.QtNfc", "PySide6.QtBluetooth", "PySide6.QtSerialPort",
     "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtPdf", "PySide6.QtPdfWidgets",
     "PySide6.QtDesigner", "PySide6.QtHelp", "PySide6.QtRemoteObjects",
     "PySide6.QtPositioning", "PySide6.QtLocation", "PySide6.QtSensors",
