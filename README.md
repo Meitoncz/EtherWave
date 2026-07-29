@@ -224,19 +224,23 @@ contributor.
 
 ## 📝 Changelog
 
-### v1.0.5
-
-- 🐛 **Fixed the macOS Dock icon staying visible while the client window
-  was minimized to the tray**, looking like a normal running app with
-  nothing to actually bring forward. The Dock icon now only shows while
-  the window is open, matching the menu bar tray icon being the only
-  thing that does anything while it's hidden.
-
 ### v1.0.4
 
 - 🐛 **Fixed the dock/taskbar icon opening a second copy of the app**
   instead of bringing the existing (hidden-to-tray) window back. Both apps
   now guard against a second instance and just raise the running one.
+- 🐛 **Fixed the macOS Dock icon staying visible while the client window
+  was minimized to the tray**, looking like a normal running app with
+  nothing to actually bring forward. The Dock icon now only shows while
+  the window is open, matching the menu bar tray icon being the only
+  thing that does anything while it's hidden.
+- 🐛 Fixed a pinned Dock icon not reopening the client window while it was
+  hidden — clicking it reactivated the already-running app but nothing
+  responded, so the window stayed hidden.
+- 🐛 Fixed clicking the macOS menu bar tray icon opening both its menu and
+  the main window at once, instead of just the menu (matching native
+  menu-bar-app convention — "Open EtherWave" is already the menu's first
+  entry).
 
 ### v1.0.3
 
