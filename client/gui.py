@@ -296,6 +296,16 @@ class ClientMainWindow(QMainWindow):
         self._quitting = False
         self._setup_tray_icon()
 
+        # Handles clicking a pinned Dock icon (macOS) while the window is
+        # hidden to the tray: that reactivates this already-running process
+        # (it's the same bundle ID, so macOS doesn't launch a second one --
+        # the single-instance guard in main.py never sees this case at
+        # all), but nothing shows the window back unless something responds
+        # to the reactivation. applicationStateChanged is the cross-platform
+        # Qt signal for exactly this transition, so no native AppKit/PyObjC
+        # hook is needed just to detect it.
+        QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+
         self.discovery_listener = DiscoveryListener()
         self.discovery_listener.servers_updated.connect(self._on_servers_updated)
         self.discovery_listener.error_occurred.connect(self._log)
@@ -569,7 +579,19 @@ class ClientMainWindow(QMainWindow):
         self.activateWindow()
 
     def _on_tray_activated(self, reason):
+        # On macOS, a QSystemTrayIcon with a context menu already shows
+        # that menu on click, matching native NSStatusItem convention --
+        # also raising the window here on Trigger meant a single click
+        # opened both the menu and the window at once. "Open EtherWave" is
+        # already the menu's first entry, so this is a no-op on macOS; other
+        # platforms keep the click-to-toggle-window behavior.
+        if sys.platform == "darwin":
+            return
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._show_from_tray()
+
+    def _on_app_state_changed(self, state):
+        if state == Qt.ApplicationState.ApplicationActive and not self.isVisible():
             self._show_from_tray()
 
     def _show_about(self):
