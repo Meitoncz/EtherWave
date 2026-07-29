@@ -126,6 +126,28 @@ def _build_stats_row(specs, column_width: int = 150):
     return container, values
 
 
+def _set_mac_dock_visible(visible: bool):
+    """Toggles the Dock icon on macOS between showing (Regular activation
+    policy) and hidden (Accessory) -- so it only appears while the window
+    is actually open, not while minimized to the tray/menu bar. PySide6 has
+    no API of its own for this; pyobjc-framework-Cocoa (a macOS-only
+    dependency, see requirements.txt) is the standard way to reach this
+    AppKit call from Python. No-ops on other platforms, or if pyobjc isn't
+    installed (e.g. running from source without it) -- this is a cosmetic
+    nicety, not something worth crashing over."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import (
+            NSApplication, NSApplicationActivationPolicyRegular,
+            NSApplicationActivationPolicyAccessory,
+        )
+    except ImportError:
+        return
+    policy = NSApplicationActivationPolicyRegular if visible else NSApplicationActivationPolicyAccessory
+    NSApplication.sharedApplication().setActivationPolicy_(policy)
+
+
 def _tray_icon_path_for_scheme(scheme) -> str:
     """Picks the monochrome tray icon variant for the current system color
     scheme: tray/menu-bar icons are conventionally simple silhouettes that
@@ -541,6 +563,7 @@ class ClientMainWindow(QMainWindow):
             self.tray_icon.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
 
     def _show_from_tray(self):
+        _set_mac_dock_visible(True)
         self.showNormal()
         self.raise_()
         self.activateWindow()
@@ -732,6 +755,7 @@ class ClientMainWindow(QMainWindow):
             # menu's "Close" to actually quit and disconnect.
             event.ignore()
             self.hide()
+            _set_mac_dock_visible(False)
             return
 
         if self.connected_ip is not None:

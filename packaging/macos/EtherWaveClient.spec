@@ -53,7 +53,7 @@ a = Analysis(
         (str(ASSETS_DIR / "icon_tray_black.png"), "."),
         (str(ASSETS_DIR / "VERSION"), "."),
     ],
-    hiddenimports=["sounddevice", "numpy"],
+    hiddenimports=["sounddevice", "numpy", "AppKit"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
