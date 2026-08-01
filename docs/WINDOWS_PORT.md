@@ -1,10 +1,19 @@
 # Windows 11 server port — planning doc
 
-Status: **not started**. This is a technical plan for porting `server/` to
-Windows 11 while preserving all current functionality, written before any
-Windows-side implementation began. If you're picking this up, read this
-whole file first — it captures the reasoning, not just the conclusions, so
-you can tell when a "decided" point actually needs to be revisited.
+Status: **deferred, backlog** — not started, no current timeline. The user
+has no physical Windows audio device supporting more than stereo, which
+rules out the Option 1 MVP below as-is; the realistic path needs a
+multichannel-capable virtual audio device (Option 2, unverified which
+product actually supports 5.1/7.1 — VAC is the current lead, not
+confirmed) or, longer-term, a custom driver (Option 3). None of that has
+been investigated yet — this is parked until there's actual appetite to
+pick it back up, not actively planned right now.
+
+This is a technical plan for porting `server/` to Windows 11 while
+preserving all current functionality, written before any Windows-side
+implementation began. If you're picking this up, read this whole file
+first — it captures the reasoning, not just the conclusions, so you can
+tell when a "decided" point actually needs to be revisited.
 
 The Linux server (this repo's `server/`) and the eventual Windows server
 are expected to become two independently-deployed apps sharing the wire
