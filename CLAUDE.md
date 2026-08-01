@@ -11,6 +11,14 @@ client, with UDP auto-discovery. Two independent PySide6 (Qt6) desktop apps
 no shared Python module between them (the wire format is intentionally
 duplicated in both, see below).
 
+A Windows 11 port of the server (mirroring `server/`, not sharing code with
+it, same as `client/` doesn't) is planned but not started. If you're
+working on that, read [`docs/WINDOWS_PORT.md`](docs/WINDOWS_PORT.md) first
+— it has the capture-backend approach (WASAPI loopback via `sounddevice`),
+what ports over unchanged, and an open architectural decision (whether to
+build a custom virtual audio device) that needs live Windows testing to
+resolve, not guessing from the Linux side.
+
 ## Commands
 
 There is no formal test suite (no pytest/unittest files) and no linter
