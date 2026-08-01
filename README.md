@@ -228,6 +228,10 @@ GPLv3 — see [`LICENSE`](LICENSE) for the full text.
 
 ## 📝 Changelog
 
+### v1.0.5
+
+- ⚖️ Relicensed to GPLv3 (previously MIT) — see the License section above.
+
 ### v1.0.4
 
 - 🐛 **Fixed the dock/taskbar icon opening a second copy of the app**
