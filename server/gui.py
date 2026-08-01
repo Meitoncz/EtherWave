@@ -497,7 +497,7 @@ class ServerMainWindow(QMainWindow):
             f"<p>Version {APP_VERSION}</p>"
             "<p>Low-latency multichannel audio streaming from a "
             "CachyOS/PipeWire server to a LAN client.</p>"
-            "<p>License: MIT</p>"
+            "<p>License: GPLv3</p>"
             '<p><a href="https://github.com/Meitoncz/EtherWave">'
             "github.com/Meitoncz/EtherWave</a></p>"
         )

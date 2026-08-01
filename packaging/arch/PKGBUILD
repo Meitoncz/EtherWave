@@ -17,7 +17,7 @@ pkgrel=1
 pkgdesc="EtherWave: low-latency multichannel audio streaming server (PipeWire virtual sink -> LAN)"
 arch=('any')
 url="https://github.com/Meitoncz/EtherWave"
-license=('MIT')
+license=('GPL3')
 depends=('python' 'pyside6' 'python-numpy' 'libpulse' 'pipewire' 'pipewire-pulse')
 source=()
 sha256sums=()
@@ -34,4 +34,5 @@ package() {
     install -Dm644 "$startdir/etherwave-server.desktop" "$pkgdir/usr/share/applications/etherwave-server.desktop"
     install -Dm644 "$repo_root/assets/icon.png" "$pkgdir/usr/share/pixmaps/etherwave.png"
     install -Dm644 "$startdir/etherwave-server.service" "$pkgdir/usr/lib/systemd/user/etherwave-server.service"
+    install -Dm644 "$repo_root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

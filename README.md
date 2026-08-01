@@ -222,6 +222,10 @@ contributor.
   `.github/workflows/release.yml`, which builds the macOS `.app` and the
   Arch package and attaches both to a GitHub Release.
 
+## ⚖️ License
+
+GPLv3 — see [`LICENSE`](LICENSE) for the full text.
+
 ## 📝 Changelog
 
 ### v1.0.4
