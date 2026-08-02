@@ -33,7 +33,9 @@ you tried only ever gave you stereo.
 ## 📋 Requirements
 
 - **Server**: CachyOS or another Arch-based Linux distro with PipeWire
-  (the default on CachyOS). Python 3.10+.
+  (the default on CachyOS), **or** Windows 11 with
+  [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) installed. Python
+  3.10+ either way.
 - **Client**: macOS 11+.
 - Both machines on the **same LAN/subnet**, wired Ethernet strongly
   recommended over Wi-Fi for a stable stream. Discovery uses UDP broadcast,
@@ -84,6 +86,50 @@ systemctl --user enable --now etherwave-server.service
 
 The app starts minimized to the tray at login. Disable with
 `systemctl --user disable --now etherwave-server.service`.
+
+## 📥 Installing the server (Windows 11)
+
+1. Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (free) —
+   this is what EtherWave captures system audio from, the Windows
+   equivalent of the PipeWire virtual sink the Linux server creates. One-
+   time setup, same as installing PipeWire is on Linux.
+2. **Only if you want more than stereo**: EtherWave can't change VB-Cable's
+   channel count itself (Windows has no equivalent of PipeWire's "create a
+   sink at any channel count on demand"). Open **Settings → Sound →
+   Recording → CABLE Output → Properties → Advanced**, pick a format at the
+   channel count you want (e.g. "6 channel, 24 bit, 48000 Hz" for 5.1), and
+   do the same on the **Playback** side for **CABLE Input** (or **CABLE In
+   16ch**, if VB-Cable installed that variant too — prefer it if present).
+   Skip this for plain stereo; VB-Cable defaults to 2 channels.
+
+### Option A: pre-built .exe (recommended)
+
+Download `EtherWave-Server-Windows-vX.Y.Z.zip` from the
+[latest release](https://github.com/Meitoncz/EtherWave/releases), unzip it
+anywhere, and run `EtherWave Server.exe` from inside the extracted folder.
+
+### Option B: run from source
+
+```powershell
+git clone https://github.com/Meitoncz/EtherWave.git
+cd EtherWave
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt -r requirements-windows.txt
+cd server_windows
+..\.venv\Scripts\python main.py
+```
+
+Either way: pick a channel layout (capped at whatever VB-Cable is currently
+configured for — see step 2 above) and hit **Start Streaming**. EtherWave
+switches your system's default output to VB-Cable and starts broadcasting
+audio + presence beacons. **Stop Streaming** restores whatever your default
+output was before.
+
+### Autostart at login
+
+Check **"Start with Windows"** in the app itself — no separate install step
+needed, it writes/removes a `HKEY_CURRENT_USER` registry value directly
+(visible/removable from Windows' own Task Manager → Startup apps tab too).
 
 ## 📥 Installing the client (macOS)
 
@@ -174,6 +220,20 @@ streaming.
   ```bash
   systemctl --user stop app-com.github.wwmm.easyeffects@autostart.service
   ```
+- **(Windows) VB-Cable becomes your system's default audio output** while
+  streaming, same "everything routes through it" behavior as
+  `EtherWave_Sink` on Linux above — and some already-running apps (VLC in
+  particular, or a browser tab that was already open) don't always follow a
+  default-device change and go silent until restarted. Not an EtherWave
+  bug: it's how those apps bind to a Windows audio device. Fully quit and
+  reopen the affected app, or in VLC's case try switching Tools →
+  Preferences → Audio → Output module away from "Auto"/WASAPI to
+  DirectSound.
+- **(Windows) The channel layout picker is capped at whatever VB-Cable is
+  currently configured for** (2 by default) — see the Windows install
+  section above for how to raise it. Picking a higher layout than what's
+  configured fails immediately with a message telling you exactly which
+  setting to change.
 - **Firewalls will silently eat the stream.** If you run `ufw` on the
   server, open the ports first — a default-deny policy drops the packets
   with no error message, which looks exactly like a bug:
@@ -215,18 +275,33 @@ quirks, etc.) live in [`CLAUDE.md`](CLAUDE.md) — written for AI-assisted
 development but equally useful as a technical deep-dive for a human
 contributor.
 
-- Every push to `main` runs `.github/workflows/ci.yml`: compiles both apps
-  and headlessly constructs both main windows to catch import/init-time
-  bugs.
+- Every push to `main` runs `.github/workflows/ci.yml`: compiles all three
+  apps (`server`, `client`, `server_windows`) and headlessly constructs
+  their main windows to catch import/init-time bugs.
 - Pushing a version tag (`git tag v1.0.0 && git push --tags`) runs
-  `.github/workflows/release.yml`, which builds the macOS `.app` and the
-  Arch package and attaches both to a GitHub Release.
+  `.github/workflows/release.yml`, which builds the macOS `.app`, the
+  Windows `.exe`, and the Arch package, and attaches all three to a GitHub
+  Release.
 
 ## ⚖️ License
 
 GPLv3 — see [`LICENSE`](LICENSE) for the full text.
 
 ## 📝 Changelog
+
+### Unreleased
+
+- 🪟 **New: Windows 11 server** (`server_windows/`) — captures system audio
+  via VB-Audio Virtual Cable + WASAPI instead of PipeWire, feature-equivalent
+  to the Linux server (multichannel layouts up to 7.1, per-channel gain, VU
+  meters, tray icon, "Start with Windows" autostart). Live-tested streaming
+  all 6 channels correctly to a real macOS client over the LAN. See
+  [`docs/WINDOWS_PORT.md`](docs/WINDOWS_PORT.md) for how it works and its
+  one real limitation (channel count is capped at whatever VB-Cable is
+  currently configured for in Windows Sound Settings, not freely settable
+  the way the Linux server's PipeWire sink is).
+- 📦 Windows `.exe` builds now included in GitHub Releases and CI, alongside
+  the existing macOS `.app` and Arch package.
 
 ### v1.0.5
 

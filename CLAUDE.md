@@ -11,13 +11,18 @@ client, with UDP auto-discovery. Two independent PySide6 (Qt6) desktop apps
 no shared Python module between them (the wire format is intentionally
 duplicated in both, see below).
 
-A Windows 11 port of the server (mirroring `server/`, not sharing code with
-it, same as `client/` doesn't) is planned but not started. If you're
-working on that, read [`docs/WINDOWS_PORT.md`](docs/WINDOWS_PORT.md) first
-— it has the capture-backend approach (WASAPI loopback via `sounddevice`),
-what ports over unchanged, and an open architectural decision (whether to
-build a custom virtual audio device) that needs live Windows testing to
-resolve, not guessing from the Linux side.
+A Windows 11 port of the server (`server_windows/`, mirroring `server/`,
+not sharing code with it, same as `client/` doesn't) exists and has been
+live-tested end-to-end against a real macOS client. It captures VB-Audio
+Virtual Cable's "CABLE Output" via WASAPI (`sounddevice`) instead of
+PipeWire/`parec`, and switches the Windows default output device via the
+undocumented COM `IPolicyConfig` interface instead of `pactl
+set-default-sink`. If you're working on it, read
+[`docs/WINDOWS_PORT.md`](docs/WINDOWS_PORT.md) first — it documents several
+non-obvious bugs (a WASAPI stream-open failure specific to background
+threads right after a default-device switch, chief among them) that were
+only found by live testing on real Windows 11 hardware, not guessable from
+the Linux side or from reading the `sounddevice`/WASAPI docs alone.
 
 ## Commands
 

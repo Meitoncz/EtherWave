@@ -1,0 +1,20 @@
+# Dependencies for server_windows/ only. The Linux server/ needs no
+# sounddevice/PortAudio at all (it shells out to `parec` -- see CLAUDE.md);
+# the Windows server captures via WASAPI through sounddevice instead, so it
+# genuinely needs this as a core runtime dependency, not just something the
+# client happens to use.
+
+# PySide6-Essentials (not the full PySide6 meta-package) -- EtherWave only
+# uses QtCore/QtGui/QtWidgets/QtNetwork, all in Essentials. See the root
+# requirements.txt for why the full "PySide6" package is avoided.
+PySide6-Essentials>=6.6
+numpy>=1.24
+
+# WASAPI capture of VB-Cable's "CABLE Output" device (server_windows/audio_engine.py).
+sounddevice>=0.4.6
+
+# Windows-only: wraps the undocumented COM IPolicyConfig/IMMDeviceEnumerator
+# interfaces used by server_windows/default_device.py to switch the system
+# default output device to VB-Cable and back -- there is no first-party
+# Windows CLI equivalent of Linux's `pactl set-default-sink`.
+comtypes>=1.2; sys_platform == "win32"

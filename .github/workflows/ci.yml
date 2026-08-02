@@ -73,3 +73,49 @@ jobs:
           bash -n packaging/macos/install.sh
           python -m py_compile packaging/macos/EtherWaveClient.spec
           python -c "import xml.dom.minidom as m; m.parse('packaging/macos/com.etherwave.client.plist')"
+
+  compile-check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-windows.txt
+
+      - name: Byte-compile every module (catches syntax errors)
+        run: python -m py_compile server_windows/*.py
+
+      - name: Import + construct the main window headlessly
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -c @"
+          import sys
+          sys.path.insert(0, 'server_windows')
+          from PySide6.QtWidgets import QApplication
+          app = QApplication(sys.argv)
+          from gui import ServerMainWindow
+          window = ServerMainWindow()
+          # Background QThreads (broadcaster/subscribers) started in
+          # __init__ must be stopped before the process exits, or Windows
+          # crashes the interpreter with STATUS_STACK_BUFFER_OVERRUN during
+          # teardown (measured directly during development -- see
+          # docs/WINDOWS_PORT.md). Going through the real _quitting +
+          # close() path (rather than stopping the threads by hand) also
+          # exercises the same teardown code a real quit takes.
+          window._quitting = True
+          window.close()
+          print('server_windows GUI constructed OK')
+          "@
+
+      - name: Validate packaging metadata
+        run: |
+          python -m py_compile packaging/windows/EtherWaveServer.spec
+          pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw packaging/windows/build.ps1)) | Out-Null"

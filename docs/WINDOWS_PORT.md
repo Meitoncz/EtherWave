@@ -1,198 +1,202 @@
-# Windows 11 server port — planning doc
+# Windows 11 server port
 
-Status: **planned, ready to start**. Decided: capture via a **VB-Audio
-Virtual Cable** virtual device rather than the real output device — the
-user confirmed VB-Cable supports up to 8 channels, which resolves the
-multichannel question that previously blocked this (there's no physical
-Windows audio device on hand that supports more than stereo, which is why
-the earlier "just loopback the current default device" MVP idea was a
-dead end and isn't the plan anymore). A custom driver is still on the
-table as a much later upgrade if VB-Cable's limitations turn out to
-matter in practice, but is not part of this pass — see "Why not a custom
-driver (yet)" below.
+Status: **done, live-tested end-to-end**. `server_windows/` mirrors
+`server/` (same relationship `server/`/`client/` already have — ported, not
+shared code) and streams to a real macOS client over the LAN exactly like
+the Linux server does. This doc now records how it actually works and the
+gotchas found by live testing on a real Windows 11 machine, superseding the
+original pre-implementation plan (kept below in spirit, but corrected where
+reality differed).
 
-This is a technical plan for porting `server/` to Windows 11 while
-preserving all current functionality, written before any Windows-side
-implementation began. If you're picking this up, read this whole file
-first — it captures the reasoning, not just the conclusions, so you can
-tell when a "decided" point actually needs to be revisited.
+Packaging (`packaging/windows/`, a PyInstaller build producing
+`EtherWave Server.exe`) and autostart-at-login (a "Start with Windows"
+checkbox backed by a `HKCU\...\Run` registry value, in `autostart.py`) are
+both done too — see "Packaging" below.
 
-The Linux server (this repo's `server/`) and the eventual Windows server
-are expected to become two independently-deployed apps sharing the wire
-protocol/discovery format but not code, the same way `server/` and
-`client/` already don't share code with each other (see CLAUDE.md's
-"Wire protocol is duplicated, not shared" section) — port, don't
-abstract.
+## Two corrections to the original plan, found by live testing
 
-## Why PipeWire can't just be used
+1. **No WASAPI loopback needed.** `sd.WasapiSettings` has no `loopback`
+   parameter (that was a documentation-research assumption, not verified
+   against the actual `sounddevice` API at the time). VB-CABLE installs as
+   a *pair* of ordinary devices — `CABLE Input` (render) and `CABLE Output`
+   (an ordinary WASAPI **recording** device that mirrors it) — so capture is
+   just a plain `sd.InputStream` on `CABLE Output`, the direct analog of
+   PipeWire's `<sink>.monitor`.
+2. **VB-CABLE actually installs *two* render endpoints**, not one: plain
+   `CABLE Input` (stuck at whatever format it defaulted to — 2ch on this
+   install) and `CABLE In 16ch` (the one whose Windows Sound Settings
+   "Advanced" tab actually offers multichannel formats). Only setting
+   **`CABLE In 16ch`** as the Windows default output actually gets
+   multichannel system audio into the pipe; `default_device.py` searches
+   for a render endpoint with `"16ch"` in its name first, falling back to
+   any `"cable"` match (covers a VB-CABLE install that only ships the plain
+   2-channel-only variant).
 
-PipeWire is Linux-only (built on Linux-specific kernel/D-Bus
-infrastructure). No equivalent runs on Windows. This means the
-`PipeWireSinkManager` + `parec` subprocess capture approach in
-`server/audio_engine.py` has no direct Windows translation — a genuinely
-different capture backend is needed, not a compatibility shim.
+## How channel count actually works (the biggest real limitation)
 
-## The capture backend: WASAPI loopback on the VB-Cable device
+Unlike the Linux server, **`server_windows` cannot set VB-Cable's channel
+count itself.** `PipeWireSinkManager.create_sink(channels)` creates a fresh
+PipeWire sink at exactly the requested channel count every time; there is no
+equivalent lever on Windows. VB-Cable's capture channel count is whatever is
+currently selected in **Windows Settings → Sound → Recording → CABLE Output
+→ Properties → Advanced → Default Format** (and the matching Playback-side
+property for the render endpoint) — a WASAPI shared-mode engine-wide format,
+not something an individual app can request.
 
-Windows' built-in mechanism for "capture whatever is playing into a given
-device" is **WASAPI loopback capture**, reachable directly through
-`sounddevice`/PortAudio — the same library the client already depends on.
-No `parec`-equivalent subprocess hack is needed; PortAudio on Windows sees
-loopback devices natively (unlike PortAudio on Linux, which is why the
-Linux server avoids it entirely — see CLAUDE.md).
+Measured directly (`sd.InputStream(channels=N, extra_settings=WasapiSettings(auto_convert=True))`
+against `CABLE Output`):
+- `N` equal to the configured format's channel count: always opens.
+- `N` less than configured: opens too (`auto_convert=True` lets PortAudio
+  downmix) — so picking a lower layout than what's configured is fine.
+- `N` greater than configured: **always fails** (`PortAudioError: Invalid
+  number of channels`), with or without `auto_convert`.
 
-The plan: install VB-Audio Virtual Cable (the user does this once, same
-category of system prerequisite as PipeWire already being present on
-CachyOS), set it as the Windows default output device so system audio
-routes into it the same way `EtherWave_Sink` becomes the PipeWire default,
-and loopback-capture *that specific device* — not "whatever the current
-default happens to be," since the default *is* the VB-Cable device once
-set.
+So: `DefaultDeviceManager.create_sink(channels)` checks the requested count
+against `CABLE Output`'s *current* configured format and raises a clear
+`RuntimeError` with the exact fix (which Advanced-tab format to pick, on
+which device) if the request exceeds it — it does not try to change the
+format itself. **A user who wants 5.1/7.1 needs to set VB-Cable's Advanced
+Default Format to that channel count once**, the same "one-time prerequisite
+setup" category as installing VB-Cable in the first place. This was tested
+live: setting both `CABLE Output` and `CABLE In 16ch` to "Channel 6, 24 bit,
+48000 Hz" made 6-channel capture work immediately, confirmed with a real
+per-channel tone test (FL/FR/FC/LFE/RL/RR all landed on the correct capture
+channel, no remix) and a live macOS client playing all 6 channels correctly
+over the LAN.
 
-```python
-import sounddevice as sd
+`IPolicyConfig::SetDeviceFormat` (reachable through the same COM interface
+`default_device.py` already uses for `SetDefaultEndpoint`) is a plausible
+lever for setting this programmatically, but no working example was found
+during development — still an open, low-priority improvement, not a
+blocker.
 
-# Find the VB-Cable device by name rather than hardcoding an index (device
-# indices aren't stable across reboots/driver changes).
-vb_cable_index = next(
-    i for i, d in enumerate(sd.query_devices())
-    if "CABLE" in d["name"] and d["max_output_channels"] > 0
-)
+## Two non-obvious bugs found only by live testing (not guessable from code)
 
-wasapi_settings = sd.WasapiSettings(loopback=True)
-with sd.InputStream(device=vb_cable_index, channels=N, samplerate=48000,
-                     extra_settings=wasapi_settings, callback=...) as stream:
-    ...
-```
+1. **Opening a *callback-mode* WASAPI stream from any thread other than the
+   one that just switched the default device fails deterministically**, with
+   a spurious host error (`PortAudioError: ... 'GetNameFromCategory:
+   usbTerminalGUID = ...' [Windows WDM-KS error -9999]`) — reproduced
+   reliably across dozens of runs. Blocking-mode streams and same-thread
+   callback streams were unaffected; only "callback mode" + "different OS
+   thread" + "shortly after `IPolicyConfig::SetDefaultEndpoint`" triggered
+   it. Root cause not fully understood (undocumented WASAPI/COM apartment
+   interaction, likely around default-endpoint-change notifications
+   propagating across COM apartments), but the fix reproduced reliably: call
+   `comtypes.CoInitialize()` at the top of `AudioCaptureThread.run()` (paired
+   with `CoUninitialize()` in a `finally`) before opening the stream — see
+   the comment on `AudioCaptureThread.run()` in `audio_engine.py`.
+   `STREAM_OPEN_RETRIES` stays in place regardless as a defensive backstop.
+2. **`DefaultDeviceManager.create_sink()` switching the default device makes
+   the very next stream-open attempt fail** even with the fix above applied,
+   unless PortAudio's own internal device/host-API tables are refreshed
+   first — `sd._terminate()` immediately followed by `sd._initialize()`,
+   called right after the `SetDefaultEndpoint` calls in `create_sink()`,
+   fixes this reliably with no delay needed (a plain `time.sleep()` between
+   switch and stream-open, even several seconds, did **not** fix it on its
+   own). `_terminate`/`_initialize` are undocumented `sounddevice` internals
+   but have been stable across the versions checked.
 
-The trick: `device=` takes the index of an **output** (render) device even
-though this opens an `InputStream` — that's what makes it "loopback."
+## Windows-side gotcha for users, found while testing (not an EtherWave bug)
 
-This replaces `parec`'s stdout-reading loop with a `sounddevice` callback
-(or blocking reads); the packet-pacing logic around `next_send_time` in
-`AudioCaptureThread.run()` is portable Python and should carry over with
-only the data-source swapped out.
+**Apps with an already-open audio session don't always follow a default-
+device change.** While testing, switching the Windows default output to
+VB-Cable left an already-running browser tab and a freshly-opened VLC
+instance producing no audible sound, while Windows system sounds and a
+fresh webpage's Web Audio test played fine. Windows' shared-mode mixer
+transparently adapts *newly opened* streams to whatever the current default
+device's format is; some apps (VLC in particular, depending on its
+"Output module" setting — WASAPI vs. DirectSound vs. WaveOut; also seen
+with a browser's audio process) can end up with a stream bound to a device
+reference that doesn't hot-swap. Fix is entirely user-side: restart the
+affected app (fully quitting a browser, not just reloading the tab), or in
+VLC's case try switching Tools → Preferences → Audio → Output module away
+from "Auto"/WASAPI to DirectSound. Worth knowing before assuming EtherWave
+itself broke playback.
 
-## Decided: VB-Cable as the virtual device
+## Architecture
 
-The Linux server creates a `EtherWave_Sink` virtual device on demand, with
-whatever channel count the user picked (2.0–7.1), and makes it the system
-default — so *all* system audio routes into it, and local playback goes
-silent (the sink has no real hardware behind it) while everything streams
-to the client instead. Note this only changes *between* streaming
-sessions in practice (pick a layout, click Start, which creates a fresh
-sink) — it isn't reconfigured while a stream is actively running, which
-matters for how ambitious the Windows equivalent actually needs to be.
+`server_windows/` — mirrors `server/`'s four-file shape:
 
-An earlier version of this doc weighed three options (no virtual device
-at all / a third-party virtual device / a custom driver) because it
-wasn't known whether any existing virtual audio device actually supports
-more than stereo. The user has since confirmed **VB-Audio Virtual Cable
-supports up to 8 channels**, which settles it — that's the path. The
-"no virtual device" MVP idea is dead (there's no physical device on hand
-that supports more than stereo to loopback from), and a custom driver is
-unnecessary complexity now that an existing free tool covers the channel
-count this project needs.
+- **`main.py`** — copy of `server/main.py`'s `QLocalServer`/`QLocalSocket`
+  single-instance guard verbatim (uses a named pipe on Windows transparently,
+  no code changes needed). Drops `setDesktopFileName()` (Wayland-only, no
+  Windows equivalent needed).
+- **`discovery.py`** — verbatim copy of `server/discovery.py`. Confirmed
+  100% portable (no OS-specific calls).
+- **`default_device.py`** (new) — `DefaultDeviceManager`, shaped like
+  `PipeWireSinkManager` (`create_sink(channels)`/`remove_sink()`/
+  `is_active`) so `gui.py`'s call sites barely differ from the Linux
+  version's. Wraps the undocumented COM `IPolicyConfig`/`IMMDeviceEnumerator`
+  interfaces via `comtypes` (GUIDs corroborated against `pycaw` and multiple
+  independent published implementations, confirmed working live on this
+  Windows 11 build) to select VB-Cable's render endpoint and restore the
+  previous default on stop.
+- **`audio_engine.py`** — mirrors `server/audio_engine.py`: all wire-protocol
+  constants and `SubscriberRegistry` copied verbatim (byte-identical to the
+  client); `_launch_parec()`'s subprocess/pipe-read loop replaced with a
+  `sd.InputStream` callback pushing into a bounded `queue.Queue`, drained by
+  `run()`'s loop in place of the old byte-buffer chunking (WASAPI already
+  delivers exact `blocksize`-frame callbacks, so no manual reblocking is
+  needed the way `parec`'s raw pipe required); the packet-pacing/construction
+  loop itself is unchanged. `AvSetMmThreadCharacteristicsW("Pro Audio")`
+  replaces the Linux `SCHED_RR` request for thread priority.
+- **`gui.py`** — copy of `server/gui.py`; only the sink-manager class and
+  `AudioCaptureThread` construction differ. VU meters, gain spinboxes,
+  `QSettings`, tray icon/`_quitting` pattern, About dialog, and stats are
+  unchanged. Adds one thing the Linux server doesn't have: a "Start with
+  Windows" checkbox (see below).
+- **`autostart.py`** (new) — `HKEY_CURRENT_USER\...\Run` registry
+  read/write (`winreg`, stdlib). Registry is the source of truth (not
+  `QSettings`) since it's also what Windows' own Task Manager "Startup apps"
+  tab shows/lets the user disable directly. Points at `sys.executable` when
+  frozen (PyInstaller), or the interpreter + `main.py` when run from source.
 
-### Why not a custom driver (yet)
+## Packaging
 
-The only way to fully match Linux's "create a sink with any channel count
-on demand, no separate install step" ergonomics would be a real
-kernel-mode Windows audio driver: a fundamentally different, much larger
-undertaking than the rest of this port — C/C++ and the WDK rather than
-Python, a Microsoft driver-signing process (an EV code-signing
-certificate, ongoing cost, plus an attestation-signing submission for it
-to load on a stock Windows 11 machine without the user disabling driver
-signature enforcement), and real stability risk (a buggy kernel audio
-driver can crash the whole machine, not just the app). VB-Cable already
-covers the channel count requirement for free, so this isn't worth taking
-on right now — revisit only if VB-Cable's limitations turn out to be a
-real practical problem once this is actually running.
+`packaging/windows/`:
+- **`EtherWaveServer.spec`** — PyInstaller spec mirroring
+  `packaging/macos/EtherWaveClient.spec`'s `Analysis`/`excludes`/
+  `hiddenimports` structure (same `UNUSED_QT_MODULES` exclude list). Onedir
+  build (`EXE(exclude_binaries=True)` + `COLLECT`, no bundle/Info.plist step
+  the way macOS needs) producing an `EtherWave Server/` folder containing
+  `EtherWave Server.exe`.
+- **`build.ps1`** — PowerShell equivalent of `packaging/macos/build.sh`:
+  installs `requirements.txt` + `requirements-windows.txt` + `pyinstaller` +
+  `Pillow`, regenerates `assets/icon.png`, converts it to `assets/icon.ico`
+  via Pillow, runs PyInstaller. Uses the repo's `.venv` if present, falls
+  back to `python` on `PATH` (for CI).
+- CI: `.github/workflows/ci.yml`'s `compile-check-windows` job (`runs-on:
+  windows-latest`) byte-compiles `server_windows/*.py` and headlessly
+  constructs `ServerMainWindow` — see the note below on why teardown needs
+  care. `.github/workflows/release.yml`'s `build-windows` job runs
+  `build.ps1` and zips the output as a release asset alongside the macOS
+  `.app` and Arch package.
 
-## What ports 1:1, no changes needed
+**Headless-test teardown gotcha on Windows** (only matters for
+CI/smoke-testing code, not the app itself): the CLAUDE.md-documented
+"construct the main window and let the script end" pattern that works fine
+for `server`/`client` on Linux/macOS **crashes the interpreter on Windows**
+(`STATUS_STACK_BUFFER_OVERRUN`) if `ServerMainWindow`'s background QThreads
+(`broadcaster`, `subscribers`) are still running when the process exits.
+Fix: go through the real shutdown path instead of just letting the script
+end — `window._quitting = True; window.close()` — exactly like
+`compile-check-windows` does. Confirmed via direct bisection: the crash
+consistently occurs strictly *after* successful construction, during
+interpreter teardown, and disappears entirely once threads are stopped
+cleanly first.
 
-- The entire wire protocol (`HEADER_FORMAT`, `MAGIC`, packet pacing) —
-  pure Python `struct`/`socket`, platform-independent.
-- `discovery.py` — pure socket/JSON code, no Linux-specific calls at all;
-  can likely be copied close to verbatim.
-- Most of `gui.py`: tray icon, About dialog, per-channel gain, VU meters,
-  `QSettings` persistence, theme-aware monochrome tray icons — PySide6/Qt
-  is cross-platform.
-- The single-instance guard (`QLocalServer`/`QLocalSocket`, see
-  `server/main.py`) — already platform-agnostic.
+## Requirements
 
-## What needs new implementation
+`requirements-windows.txt` (separate from the shared root
+`requirements.txt`, since — unlike the Linux server — this one genuinely
+needs `sounddevice`/PortAudio as a runtime dependency, not just something
+the client uses): `PySide6-Essentials`, `numpy`, `sounddevice`, `comtypes`
+(Windows-only, `sys_platform == "win32"` marker).
 
-1. **Capture backend** (see above) — the biggest piece of actual new code.
-2. **Setting VB-Cable as the default output device programmatically** —
-   the Windows equivalent of `PipeWireSinkManager.create_sink()`/
-   `pactl set-default-sink`. Windows has no first-party command-line
-   equivalent; the usual approaches are the undocumented-but-widely-used
-   COM `IPolicyConfig` interface (via `comtypes`/`ctypes`), or shelling
-   out to a third-party CLI tool (e.g. `nircmd`, `SoundVolumeView`) the
-   way the Linux server shells out to `pactl`/`parec`. Needs real research
-   and live testing — this is unexplored territory, not just a capture
-   backend swap.
-3. **VB-Cable's channel count** — need to determine, live, whether it's
-   configured once via VB-Cable's own control panel/driver properties
-   (in which case EtherWave can only detect and use whatever's currently
-   set, similar to the earlier MVP idea's limitation) or something
-   EtherWave can actually set per-session to match the chosen layout,
-   the way `PipeWireSinkManager` creates a fresh sink at the chosen
-   channel count on every Start Streaming click.
-4. **Local playback behavior** — once VB-Cable is the default output,
-   confirm it behaves like `EtherWave_Sink` (nothing physically connected,
-   so local playback goes silent) rather than passing audio through to
-   real speakers by default — some virtual-cable products have their own
-   optional "listen to this device" passthrough that would need to be off.
-5. **Autostart at login** — no systemd/LaunchAgent equivalent. Standard
-   Windows approaches: a shortcut in `shell:startup`
-   (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`), or a
-   registry `Run` key
-   (`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`).
-6. **Packaging** — PyInstaller can produce a `.exe` the same way it
-   produces the macOS `.app` (see `packaging/macos/EtherWaveClient.spec`
-   for the pattern to mirror). Recommend shipping a working `.exe` from
-   source first and deferring a proper installer (Inno Setup / NSIS) to a
-   later pass — the macOS packaging also only reached its current state
-   through several iterations, not on the first attempt. Should probably
-   also check/document VB-Cable as an install prerequisite, the same way
-   the README tells Linux users PipeWire needs to already be present.
-7. **New server dependency**: unlike Linux (where the server needs no
-   `sounddevice`/PortAudio at all), the Windows server needs it as its
-   core capture mechanism — a real split from the current
-   `requirements.txt` structure, which assumes the server is
-   dependency-light. Give the Windows server its own requirements file
-   rather than overloading the shared one with platform markers for a
-   dependency the Linux server never needed in the first place.
+## Prerequisite: VB-Audio Virtual Cable
 
-## Open questions that need live testing on Windows (can't be resolved by reasoning alone)
-
-1. How VB-Cable's channel count is actually configured — statically via
-   its own control panel/driver properties, or something EtherWave can
-   set per-session. Directly decides whether the channel-layout picker in
-   the GUI can work the way it does on Linux (see item 3 in "What needs
-   new implementation" above).
-2. The concrete mechanism for setting VB-Cable as the Windows default
-   output device from Python (`IPolicyConfig` via `comtypes` vs. shelling
-   out to a CLI tool) — unresearched, see item 2 above.
-3. Whether local playback actually goes silent once VB-Cable is default
-   (matching `EtherWave_Sink`), or needs an explicit step to prevent
-   passthrough to real speakers.
-4. What actually happens if `channels=N` requested on `InputStream`
-   doesn't match VB-Cable's current configured format — hard failure,
-   silent downmix/upmix by PortAudio, or something else.
-5. Windows taskbar/notification-area icon behavior — KDE Plasma and macOS
-   each had their own unexpected quirks this project already had to
-   live-debug (dock icon reopen, tray-click-opens-both-menu-and-window,
-   monochrome icon theming). Assume Windows has its own set; don't assume
-   parity with either existing platform without checking.
-
-## Suggested directory structure
-
-A new `server_windows/` directory mirroring `server/`'s files (`main.py`,
-`gui.py`, `audio_engine.py` equivalent, `discovery.py`) — consistent with
-this project's established preference for duplicating code across
-independently-deployed apps rather than sharing a module with platform
-branches threaded through it (see CLAUDE.md). `discovery.py` in
-particular should need close to no changes from the Linux version.
+Install from VB-Audio's official site (the user installs it once, same
+category of one-time setup as PipeWire already being present on CachyOS).
+After installing, if more than stereo is wanted, set the channel count via
+Windows Sound Settings' Advanced tab as described above — `server_windows`
+detects and works with whatever's configured, it doesn't set it.
