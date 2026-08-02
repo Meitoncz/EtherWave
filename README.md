@@ -289,7 +289,7 @@ GPLv3 — see [`LICENSE`](LICENSE) for the full text.
 
 ## 📝 Changelog
 
-### Unreleased
+### v1.0.6
 
 - 🪟 **New: Windows 11 server** (`server_windows/`) — captures system audio
   via VB-Audio Virtual Cable + WASAPI instead of PipeWire, feature-equivalent
