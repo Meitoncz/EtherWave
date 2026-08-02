@@ -89,7 +89,14 @@ jobs:
           pip install -r requirements.txt -r requirements-windows.txt
 
       - name: Byte-compile every module (catches syntax errors)
-        run: python -m py_compile server_windows/*.py
+        # Not `py_compile server_windows/*.py` -- pwsh (the default shell on
+        # windows-latest runners) doesn't glob-expand wildcard arguments for
+        # external commands the way bash does, so that literally tries to
+        # open a file named "server_windows/*.py" and fails with
+        # `[Errno 22] Invalid argument` (confirmed locally during
+        # development). Let Python's own glob do the expansion instead, so
+        # it's portable across shells.
+        run: python -c "import glob, py_compile; [py_compile.compile(f, doraise=True) for f in glob.glob('server_windows/*.py')]"
 
       - name: Import + construct the main window headlessly
         shell: pwsh
